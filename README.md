@@ -1,5 +1,12 @@
 # Gemini Enterprise License Assignment Script
 
+## The Problem
+
+Gemini Enterprise does not support group-based license assignment natively currently. The console and API require individual email addresses, and the auto-assign feature only works for a single edition — it can't differentiate between Frontline, Standard, and Plus users.
+If you're managing multiple editions across different user populations, you're stuck manually assigning licenses one by one.
+
+## The Solution
+
 Programmatically assign Gemini Enterprise licenses by edition using Google Group membership as the source of truth.
 
 This script bridges Google Groups and the Gemini Enterprise Discovery Engine API. Define a mapping of Google Group → subscription edition, and the script will:
