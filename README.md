@@ -1,4 +1,4 @@
-# Gemini Enterprise License Sync
+# Gemini Enterprise License Assignment Script
 
 Programmatically assign Gemini Enterprise licenses by edition using Google Group membership as the source of truth.
 
