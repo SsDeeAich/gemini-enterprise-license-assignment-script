@@ -14,16 +14,19 @@
 
 set -euo pipefail
 
-# Load config from .env if present, otherwise fall back to defaults
+# Load config from config.json if present
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-if [ -f "${SCRIPT_DIR}/.env" ]; then
-  # shellcheck disable=SC1091
-  source "${SCRIPT_DIR}/.env"
-fi
+CONFIG_FILE="${SCRIPT_DIR}/config.json"
 
-PROJECT_ID="${PROJECT_ID:-your-project-id}"
-LOCATION="${LOCATION:-global}"
-ENDPOINT_LOCATION="${ENDPOINT_LOCATION:-global}"
+if command -v jq &>/dev/null && [ -f "$CONFIG_FILE" ]; then
+  PROJECT_ID=$(jq -r '.project_id // ""' "$CONFIG_FILE" 2>/dev/null || echo "")
+  LOCATION=$(jq -r '.location // "global"' "$CONFIG_FILE" 2>/dev/null || echo "global")
+  ENDPOINT_LOCATION=$(jq -r '.endpoint_location // "global"' "$CONFIG_FILE" 2>/dev/null || echo "global")
+else
+  PROJECT_ID=""
+  LOCATION="global"
+  ENDPOINT_LOCATION="global"
+fi
 
 # --- Helpers ---
 
@@ -56,10 +59,16 @@ _require_auth() {
 }
 
 _require_config() {
-  if [ "$PROJECT_ID" = "your-project-id" ]; then
-    echo "ERROR: PROJECT_ID is still set to the placeholder value."
-    echo "       Create a .env file (see .env.example) or pass PROJECT_ID as an env var."
-    exit 1
+  # Auto-discover PROJECT_ID if empty
+  if [ -z "$PROJECT_ID" ] || [ "$PROJECT_ID" = "your-project-id" ]; then
+    PROJECT_ID=$(gcloud config get-value project 2>/dev/null || echo "")
+    if [ -z "$PROJECT_ID" ]; then
+      echo "  ERROR: Could not auto-discover PROJECT_ID."
+      echo "         Please set it in config.json or run: gcloud config set project YOUR_PROJECT"
+      exit 1
+    else
+      echo "  ℹ Auto-discovered Project ID: $PROJECT_ID"
+    fi
   fi
 }
 
@@ -95,9 +104,10 @@ cmd_check_prereqs() {
 
   printf "  jq ................... "
   if command -v jq &>/dev/null; then
-    echo "✓ installed (optional, for JSON formatting)"
+    echo "✓ installed"
   else
-    echo "- not found (optional)"
+    echo "✗ NOT FOUND (required for formatting configs)"
+    ok=false
   fi
 
   printf "  gcloud auth .......... "
@@ -111,6 +121,26 @@ cmd_check_prereqs() {
   fi
 
   echo ""
+  
+  if [ "$ok" = true ] && [ -n "$PROJECT_ID" ]; then
+    printf "  IAM Permissions ...... "
+    local account
+    account=$(gcloud config get-value account 2>/dev/null)
+    local roles
+    roles=$(gcloud projects get-iam-policy "$PROJECT_ID" \
+      --flatten="bindings[].members" \
+      --format="value(bindings.role)" \
+      --filter="bindings.members:$account" 2>/dev/null)
+    
+    if echo "$roles" | grep -E 'roles/discoveryengine\.(admin|editor)' >/dev/null; then
+      echo "✓ valid (Discovery Engine Admin/Editor)"
+    else
+      echo "⚠ WARNING: Could not verify 'roles/discoveryengine.admin' for $account."
+      echo "             Assignments may fail if you lack permissions."
+    fi
+    echo ""
+  fi
+
   if [ "$ok" = true ]; then
     echo "All prerequisites met ✓"
   else
@@ -135,8 +165,8 @@ cmd_get_project_number() {
   }
   echo "  Project Number: ${number}"
   echo ""
-  echo "  Add this to your .env file:"
-  echo "    PROJECT_NUMBER=\"${number}\""
+  echo "  Add this to your config.json file (optional if running in Cloud Shell):"
+  echo "    \"project_number\": \"${number}\""
 }
 
 cmd_list_configs() {
@@ -146,19 +176,24 @@ cmd_list_configs() {
   _require_auth
   _require_config
 
-  local formatter="cat"
   if command -v jq &>/dev/null; then
-    formatter="jq ."
-  elif command -v python3 &>/dev/null; then
-    formatter="python3 -m json.tool"
+    curl -s -X GET \
+      -H "Authorization: Bearer $(gcloud auth print-access-token)" \
+      -H "Content-Type: application/json" \
+      -H "X-Goog-User-Project: ${PROJECT_ID}" \
+      "https://${ENDPOINT_LOCATION}-discoveryengine.googleapis.com/v1/projects/${PROJECT_ID}/locations/${LOCATION}/userStores/default_user_store/licenseConfigsUsageStats" \
+      | jq -r '.licenseConfigsUsageStats[]? | .licenseConfig | split("/") | last'
+    
+    echo ""
+    echo "  (Copy/paste the exact strings above into your config.json group_mappings)"
+  else
+    # Fallback to raw output if jq is somehow missing despite prereq checks
+    curl -s -X GET \
+      -H "Authorization: Bearer $(gcloud auth print-access-token)" \
+      -H "Content-Type: application/json" \
+      -H "X-Goog-User-Project: ${PROJECT_ID}" \
+      "https://${ENDPOINT_LOCATION}-discoveryengine.googleapis.com/v1/projects/${PROJECT_ID}/locations/${LOCATION}/userStores/default_user_store/licenseConfigsUsageStats"
   fi
-
-  curl -s -X GET \
-    -H "Authorization: Bearer $(gcloud auth print-access-token)" \
-    -H "Content-Type: application/json" \
-    -H "X-Goog-User-Project: ${PROJECT_ID}" \
-    "https://${ENDPOINT_LOCATION}-discoveryengine.googleapis.com/v1/projects/${PROJECT_ID}/locations/${LOCATION}/userStores/default_user_store/licenseConfigsUsageStats" \
-    | $formatter
 }
 
 cmd_list_licenses() {
@@ -195,7 +230,7 @@ usage() {
   echo "  list-licenses       List currently assigned user licenses"
   echo ""
   echo "Configuration:"
-  echo "  Create a .env file (see .env.example) or export PROJECT_ID, LOCATION, etc."
+  echo "  Create a config.json file (see config.json.example) or if running in Cloud Shell, you can skip configuring the project details."
 }
 
 case "${1:-}" in
