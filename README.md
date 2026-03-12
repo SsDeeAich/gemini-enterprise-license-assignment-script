@@ -86,7 +86,6 @@ This fetches group members and logs all actions without making any API calls to 
 ### 6. Run the Sync
 
 ```bash
-chmod +x gemini-license-sync.sh gemini-helpers.sh
 ./gemini-license-sync.sh
 ```
 

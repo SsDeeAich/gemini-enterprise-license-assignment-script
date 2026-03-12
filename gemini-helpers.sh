@@ -104,9 +104,10 @@ cmd_check_prereqs() {
 
   printf "  jq ................... "
   if command -v jq &>/dev/null; then
-    echo "✓ installed (optional, for JSON formatting)"
+    echo "✓ installed"
   else
-    echo "- not found (optional)"
+    echo "✗ NOT FOUND (required for formatting configs)"
+    ok=false
   fi
 
   printf "  gcloud auth .......... "
@@ -120,6 +121,26 @@ cmd_check_prereqs() {
   fi
 
   echo ""
+  
+  if [ "$ok" = true ] && [ -n "$PROJECT_ID" ]; then
+    printf "  IAM Permissions ...... "
+    local account
+    account=$(gcloud config get-value account 2>/dev/null)
+    local roles
+    roles=$(gcloud projects get-iam-policy "$PROJECT_ID" \
+      --flatten="bindings[].members" \
+      --format="value(bindings.role)" \
+      --filter="bindings.members:$account" 2>/dev/null)
+    
+    if echo "$roles" | grep -E 'roles/discoveryengine\.(admin|editor)' >/dev/null; then
+      echo "✓ valid (Discovery Engine Admin/Editor)"
+    else
+      echo "⚠ WARNING: Could not verify 'roles/discoveryengine.admin' for $account."
+      echo "             Assignments may fail if you lack permissions."
+    fi
+    echo ""
+  fi
+
   if [ "$ok" = true ]; then
     echo "All prerequisites met ✓"
   else
@@ -155,19 +176,24 @@ cmd_list_configs() {
   _require_auth
   _require_config
 
-  local formatter="cat"
   if command -v jq &>/dev/null; then
-    formatter="jq ."
-  elif command -v python3 &>/dev/null; then
-    formatter="python3 -m json.tool"
+    curl -s -X GET \
+      -H "Authorization: Bearer $(gcloud auth print-access-token)" \
+      -H "Content-Type: application/json" \
+      -H "X-Goog-User-Project: ${PROJECT_ID}" \
+      "https://${ENDPOINT_LOCATION}-discoveryengine.googleapis.com/v1/projects/${PROJECT_ID}/locations/${LOCATION}/userStores/default_user_store/licenseConfigsUsageStats" \
+      | jq -r '.licenseConfigsUsageStats[]? | .licenseConfig | split("/") | last'
+    
+    echo ""
+    echo "  (Copy/paste the exact strings above into your config.json group_mappings)"
+  else
+    # Fallback to raw output if jq is somehow missing despite prereq checks
+    curl -s -X GET \
+      -H "Authorization: Bearer $(gcloud auth print-access-token)" \
+      -H "Content-Type: application/json" \
+      -H "X-Goog-User-Project: ${PROJECT_ID}" \
+      "https://${ENDPOINT_LOCATION}-discoveryengine.googleapis.com/v1/projects/${PROJECT_ID}/locations/${LOCATION}/userStores/default_user_store/licenseConfigsUsageStats"
   fi
-
-  curl -s -X GET \
-    -H "Authorization: Bearer $(gcloud auth print-access-token)" \
-    -H "Content-Type: application/json" \
-    -H "X-Goog-User-Project: ${PROJECT_ID}" \
-    "https://${ENDPOINT_LOCATION}-discoveryengine.googleapis.com/v1/projects/${PROJECT_ID}/locations/${LOCATION}/userStores/default_user_store/licenseConfigsUsageStats" \
-    | $formatter
 }
 
 cmd_list_licenses() {
