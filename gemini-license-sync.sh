@@ -1,4 +1,5 @@
 #!/bin/bash
+
 # =============================================================================
 # Gemini Enterprise License Sync
 # Assigns licenses by edition based on Google Group membership
@@ -213,8 +214,7 @@ get_group_members() {
   local group_email="$1"
   gcloud identity groups memberships list \
     --group-email="${group_email}" \
-    --format="value(preferredMemberKey.id)" \
-    2>/dev/null || echo ""
+    --format="value(preferredMemberKey.id)"
 }
 
 assign_licenses_batch() {
@@ -295,6 +295,13 @@ for i in "${!GROUP_EMAILS[@]}"; do
 
   # Fetch group members
   members_raw=$(get_group_members "$group_email")
+  fetch_status=$?
+
+  if [ $fetch_status -ne 0 ]; then
+    log ERROR "Failed to fetch members for $group_email. See gcloud error above."
+    TOTAL_ERRORS=$((TOTAL_ERRORS + 1))
+    continue
+  fi
 
   # Convert to array (compatible with both bash 3.2+ and Cloud Shell)
   members=()
