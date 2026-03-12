@@ -17,6 +17,31 @@ This script bridges Google Groups and the Gemini Enterprise Discovery Engine API
 
 This gives you group-based license management where the group is the single source of truth for each edition tier.
 
+## How It Works
+
+```
+┌─────────────────────────┐
+│   Google Groups           │
+│                           │
+│  gemini-plus@company.com  │──► Plus licenses
+│  gemini-std@company.com   │──► Standard licenses
+│  gemini-fl@company.com    │──► Frontline licenses
+└─────────────────────────┘
+            │
+            ▼
+    gcloud identity groups
+    memberships list
+            │
+            ▼
+┌─────────────────────────┐
+│  batchUpdateUserLicenses  │
+│  (Discovery Engine API)   │
+│                           │
+│  Each user gets the       │
+│  licenseConfig matching   │
+│  their group's edition    │
+└─────────────────────────┘
+```
 
 ### Required APIs & Permissions
 
