@@ -18,20 +18,30 @@ This script bridges Google Groups and the Gemini Enterprise Discovery Engine API
 This gives you group-based license management where the group is the single source of truth for each edition tier.
 
 
-### Required IAM Roles & Permissions
+### Required APIs & Permissions
+
+Before running the scripts, ensure the following APIs and permissions are configured for your Google Cloud Project.
+
+#### 1. Enabled APIs
+
+You must enable the following APIs in your Google Cloud Project:
+* **Cloud Identity API** (`cloudidentity.googleapis.com`) – Required to query Google Groups memberships.
+* **Discovery Engine API** (`discoveryengine.googleapis.com`) – Required to retrieve license configurations and assign licenses to users.
+
+#### 2. IAM Roles
 
 To run these scripts, the authenticated user (or service account) must have the following permissions:
 
-1. **Cloud Identity / Workspace Admin Roles**
-   Required to list the members of Google Groups (`gcloud identity groups memberships list`).
-   * **Google Workspace Admin** with Groups Reader privileges, OR
-   * **Groups Admin** role, OR
-   * **Groups Reader** role in Cloud Identity
+**A. Cloud Identity / Workspace Admin Roles**
+Required to list the members of Google Groups (`gcloud identity groups memberships list`).
+* **Google Workspace Admin** with Groups Reader privileges, OR
+* **Groups Admin** role, OR
+* **Groups Reader** role in Cloud Identity
 
-2. **Google Cloud IAM Roles**
-   Required to query and assign licenses via the Discovery Engine API.
-   * **Discovery Engine Admin** (`roles/discoveryengine.admin`) on the target project, OR
-   * **Discovery Engine Editor** (`roles/discoveryengine.editor`)
+**B. Google Cloud IAM Roles**
+Required to query and assign licenses via the Discovery Engine API.
+* **Discovery Engine Admin** (`roles/discoveryengine.admin`) on the target project, OR
+* **Discovery Engine Editor** (`roles/discoveryengine.editor`)
 
 ## Quick Start (Cloud Shell)
 
