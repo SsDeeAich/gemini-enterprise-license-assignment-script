@@ -214,7 +214,7 @@ get_group_members() {
   gcloud identity groups memberships list \
     --group-email="${group_email}" \
     --format="value(preferredMemberKey.id)" \
-    2>/dev/null
+    2>/dev/null || echo ""
 }
 
 assign_licenses_batch() {
@@ -296,24 +296,24 @@ for i in "${!GROUP_EMAILS[@]}"; do
   # Fetch group members
   members_raw=$(get_group_members "$group_email")
 
-  if [ -z "$members_raw" ]; then
-    log WARN "No members found in group — skipping"
-    continue
-  fi
-
-  # Convert to array (compatible with bash 3.2+)
+  # Convert to array (compatible with both bash 3.2+ and Cloud Shell)
   members=()
   while IFS= read -r line; do
     [ -n "$line" ] && members+=("$line")
   done <<< "$members_raw"
 
   member_count=${#members[@]}
+  if [ "$member_count" -eq 0 ]; then
+    log WARN "No members found in group — skipping"
+    continue
+  fi
+
   log INFO "Found ${member_count} members"
 
   # Process in batches
-  for ((i = 0; i < member_count; i += BATCH_SIZE)); do
-    batch=("${members[@]:i:BATCH_SIZE}")
-    batch_num=$(( (i / BATCH_SIZE) + 1 ))
+  for ((j = 0; j < member_count; j += BATCH_SIZE)); do
+    batch=("${members[@]:j:BATCH_SIZE}")
+    batch_num=$(( (j / BATCH_SIZE) + 1 ))
     total_batches=$(( (member_count + BATCH_SIZE - 1) / BATCH_SIZE ))
 
     log INFO "Assigning batch ${batch_num}/${total_batches} (${#batch[@]} users)..."
@@ -323,7 +323,6 @@ for i in "${!GROUP_EMAILS[@]}"; do
       TOTAL_ERRORS=$((TOTAL_ERRORS + 1))
     fi
 
-    # Small delay between batches to avoid rate limiting
     if [ "$batch_num" -lt "$total_batches" ]; then
       sleep 1
     fi
