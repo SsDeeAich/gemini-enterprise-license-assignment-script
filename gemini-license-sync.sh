@@ -52,9 +52,41 @@ if ! command -v jq &>/dev/null; then
   exit 1
 fi
 
+# === LOGGING & VISUALS ===
+LOG_FILE="gemini-license-sync-$(date +%Y%m%d-%H%M%S).log"
+
+# ANSI Colors
+C_RESET="\033[0m"
+C_GREEN="\033[1;32m"
+C_RED="\033[1;31m"
+C_BLUE="\033[1;34m"
+C_YELLOW="\033[1;33m"
+C_CYAN="\033[1;36m"
+C_BOLD="\033[1m"
+
+log() {
+  local level="$1"
+  shift
+  local color=""
+  local prefix=""
+  
+  case "$level" in
+    SUCCESS) color="$C_GREEN"; prefix="  ✓ " ;;
+    ERROR)   color="$C_RED"; prefix="  ✗ " ;;
+    INFO)    color="$C_BLUE"; prefix="  ℹ " ;;
+    WARN)    color="$C_YELLOW"; prefix="  ⚠ " ;;
+    HEADER)  color="$C_CYAN$C_BOLD"; prefix="" ;;
+    *)       color="$C_RESET"; prefix="    " ;; # Default/None
+  esac
+
+  echo -e "${color}${prefix}$*${C_RESET}"
+  # Strip ANSI codes for the log file
+  echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | sed 's/\x1b\[[0-9;]*m//g' >> "$LOG_FILE"
+}
+
 # === CONFIGURATION (Parsed from JSON) ===
-PROJECT_ID=$(jq -r '.project_id // "your-project-id"' "$CONFIG_FILE")
-PROJECT_NUMBER=$(jq -r '.project_number // "123456789012"' "$CONFIG_FILE")
+PROJECT_ID=$(jq -r '.project_id // ""' "$CONFIG_FILE")
+PROJECT_NUMBER=$(jq -r '.project_number // ""' "$CONFIG_FILE")
 LOCATION=$(jq -r '.location // "global"' "$CONFIG_FILE")
 ENDPOINT_LOCATION=$(jq -r '.endpoint_location // "global"' "$CONFIG_FILE")
 DELETE_UNASSIGNED=$(jq -r '.delete_unassigned // false' "$CONFIG_FILE")
@@ -114,20 +146,38 @@ check_prereqs() {
 validate_config() {
   local ok=true
 
-  if [ "$PROJECT_ID" = "your-project-id" ]; then
-    echo "ERROR: PROJECT_ID is still set to the placeholder value."
-    echo "       Edit the config.json file."
-    ok=false
+  # Auto-discover PROJECT_ID if empty
+  if [ -z "$PROJECT_ID" ] || [ "$PROJECT_ID" = "your-project-id" ]; then
+    log INFO "Project ID not provided in config.json. Attempting auto-discovery..."
+    PROJECT_ID=$(gcloud config get-value project 2>/dev/null || echo "")
+    if [ -z "$PROJECT_ID" ]; then
+      log ERROR "Could not auto-discover PROJECT_ID."
+      log ERROR "Please set it in config.json or run: gcloud config set project YOUR_PROJECT"
+      ok=false
+    else
+      log SUCCESS "Auto-discovered Project ID: $PROJECT_ID"
+    fi
   fi
 
-  if [ "$PROJECT_NUMBER" = "123456789012" ]; then
-    echo "ERROR: PROJECT_NUMBER is still set to the placeholder value."
-    echo "       Find it via: ./gemini-helpers.sh get-project-number"
-    ok=false
+  # Auto-discover PROJECT_NUMBER if empty
+  if [ -z "$PROJECT_NUMBER" ] || [ "$PROJECT_NUMBER" = "123456789012" ]; then
+    if [ -n "$PROJECT_ID" ]; then
+      log INFO "Project Number not provided in config.json. Attempting auto-discovery..."
+      PROJECT_NUMBER=$(gcloud projects describe "$PROJECT_ID" --format="value(projectNumber)" 2>/dev/null || echo "")
+      if [ -z "$PROJECT_NUMBER" ]; then
+        log ERROR "Could not auto-discover PROJECT_NUMBER for project $PROJECT_ID."
+        log ERROR "Check your IAM permissions or set it manually in config.json."
+        ok=false
+      else
+        log SUCCESS "Auto-discovered Project Number: $PROJECT_NUMBER"
+      fi
+    else
+      ok=false
+    fi
   fi
 
   if [ ${#GROUP_EMAILS[@]} -eq 0 ]; then
-    echo "ERROR: No group-to-subscription mappings defined."
+    log ERROR "No group-to-subscription mappings defined."
     ok=false
   fi
 
@@ -136,8 +186,8 @@ validate_config() {
     local group_email="${GROUP_EMAILS[$i]}"
     local sub_id="${GROUP_SUBSCRIPTIONS[$i]}"
     if [[ "$sub_id" == SUBSCRIPTION_ID_* ]]; then
-      echo "WARNING: Subscription ID for ${group_email} looks like a placeholder: ${sub_id}"
-      echo "         Find real IDs via: ./gemini-helpers.sh list-configs"
+      log WARN "Subscription ID for ${group_email} looks like a placeholder: ${sub_id}"
+      log WARN "Find real IDs via: ./gemini-helpers.sh list-configs"
       ok=false
     fi
   done
@@ -147,12 +197,11 @@ validate_config() {
   fi
 }
 
+# Check prereqs before validation so gcloud commands work
 check_prereqs
 validate_config
 
-# === LOGGING ===
-LOG_FILE="gemini-license-sync-$(date +%Y%m%d-%H%M%S).log"
-log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOG_FILE"; }
+
 
 # === CACHE ACCESS TOKEN ===
 # Fetch once and reuse — avoids repeated gcloud calls and mid-run expiry risk
@@ -187,7 +236,7 @@ assign_licenses_batch() {
   user_licenses="${user_licenses%,}"
 
   if [ "$DRY_RUN" = true ]; then
-    log "  [DRY RUN] Would assign ${#emails[@]} licenses with config: ${subscription_id}"
+    log NONE "[DRY RUN] Would assign ${#emails[@]} licenses with config: ${subscription_id}"
     return 0
   fi
 
@@ -214,24 +263,25 @@ assign_licenses_batch() {
   body=$(echo "$response" | sed '$d')
 
   if [[ "$http_code" =~ ^2 ]]; then
-    log "  ✓ Batch assigned successfully (HTTP ${http_code})"
+    log SUCCESS "Batch assigned successfully (HTTP ${http_code})"
     return 0
   else
-    log "  ✗ Batch failed (HTTP ${http_code}): ${body}"
+    log ERROR "Batch failed (HTTP ${http_code}): ${body}"
     return 1
   fi
 }
 
 # === MAIN ===
 
-log "=========================================="
+echo ""
+log HEADER "=========================================="
 if [ "$DRY_RUN" = true ]; then
-  log "*** DRY RUN MODE — no changes will be made ***"
+  log WARN "*** DRY RUN MODE — no changes will be made ***"
 fi
-log "Gemini Enterprise License Sync Starting"
-log "Project: ${PROJECT_ID} | Location: ${LOCATION}"
-log "Delete unassigned: ${DELETE_UNASSIGNED}"
-log "=========================================="
+log HEADER "Gemini Enterprise License Sync Starting"
+log NONE "Project: ${PROJECT_ID} | Location: ${LOCATION}"
+log NONE "Delete unassigned: ${DELETE_UNASSIGNED}"
+log HEADER "=========================================="
 
 TOTAL_ASSIGNED=0
 TOTAL_ERRORS=0
@@ -239,15 +289,15 @@ TOTAL_ERRORS=0
 for i in "${!GROUP_EMAILS[@]}"; do
   group_email="${GROUP_EMAILS[$i]}"
   subscription_id="${GROUP_SUBSCRIPTIONS[$i]}"
-  log ""
-  log "Processing group: ${group_email}"
-  log "  Subscription ID: ${subscription_id}"
+  log HEADER ""
+  log HEADER "Processing group: ${group_email}"
+  log NONE "  Subscription ID: ${subscription_id}"
 
   # Fetch group members
   members_raw=$(get_group_members "$group_email")
 
   if [ -z "$members_raw" ]; then
-    log "  ⚠ No members found in group — skipping"
+    log WARN "No members found in group — skipping"
     continue
   fi
 
@@ -258,7 +308,7 @@ for i in "${!GROUP_EMAILS[@]}"; do
   done <<< "$members_raw"
 
   member_count=${#members[@]}
-  log "  Found ${member_count} members"
+  log INFO "Found ${member_count} members"
 
   # Process in batches
   for ((i = 0; i < member_count; i += BATCH_SIZE)); do
@@ -266,7 +316,7 @@ for i in "${!GROUP_EMAILS[@]}"; do
     batch_num=$(( (i / BATCH_SIZE) + 1 ))
     total_batches=$(( (member_count + BATCH_SIZE - 1) / BATCH_SIZE ))
 
-    log "  Assigning batch ${batch_num}/${total_batches} (${#batch[@]} users)..."
+    log INFO "Assigning batch ${batch_num}/${total_batches} (${#batch[@]} users)..."
     if assign_licenses_batch "$subscription_id" "${batch[@]}"; then
       TOTAL_ASSIGNED=$((TOTAL_ASSIGNED + ${#batch[@]}))
     else
@@ -280,16 +330,16 @@ for i in "${!GROUP_EMAILS[@]}"; do
   done
 done
 
-log ""
-log "=========================================="
-log "Sync complete."
-log "  Users assigned:  ${TOTAL_ASSIGNED}"
-log "  Batch errors:    ${TOTAL_ERRORS}"
+echo ""
+log HEADER "=========================================="
+log HEADER "Sync complete."
+log SUCCESS "Users assigned:  ${TOTAL_ASSIGNED}"
+log ERROR   "Batch errors:    ${TOTAL_ERRORS}"
 if [ "$DRY_RUN" = true ]; then
-  log "  *** This was a dry run — no changes were made ***"
+  log WARN "*** This was a dry run — no changes were made ***"
 fi
-log "Log saved to: ${LOG_FILE}"
-log "=========================================="
+log INFO "Log saved to: ${LOG_FILE}"
+log HEADER "=========================================="
 
 # Exit with non-zero if there were errors
 if [ "$TOTAL_ERRORS" -gt 0 ]; then

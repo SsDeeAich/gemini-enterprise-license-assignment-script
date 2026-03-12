@@ -33,136 +33,47 @@ To run these scripts, the authenticated user (or service account) must have the 
    * **Discovery Engine Admin** (`roles/discoveryengine.admin`) on the target project, OR
    * **Discovery Engine Editor** (`roles/discoveryengine.editor`)
 
-## Quick Start
+## Quick Start (Cloud Shell)
+
+This script is optimized to run inside Google Cloud Shell. When run in Cloud Shell, it automatically discovers your current project ID and project number, meaning **zero project configuration is required**—you only need to define your group mappings!
 
 ```bash
-# 1. Check prerequisites
+# 1. Verify your environment is ready
 ./gemini-helpers.sh check-prereqs
 
-# 2. Copy and fill in your config
+# 2. Copy the config template
 cp config.json.example config.json
-# Edit config.json with your project ID, project number, group emails, and subscription IDs
-
-# 3. Find your subscription IDs
-./gemini-helpers.sh list-configs
-
-# 4. Preview what the sync will do (no changes made)
-./gemini-license-sync.sh --dry-run
-
-# 5. Run the sync
-./gemini-license-sync.sh
 ```
 
-## How It Works
+### 3. Edit your Configuration
 
-```
-┌─────────────────────────┐
-│   Google Groups           │
-│                           │
-│  gemini-plus@company.com  │──► Plus licenses
-│  gemini-std@company.com   │──► Standard licenses
-│  gemini-fl@company.com    │──► Frontline licenses
-└─────────────────────────┘
-            │
-            ▼
-    gcloud identity groups
-    memberships list
-            │
-            ▼
-┌─────────────────────────┐
-│  batchUpdateUserLicenses  │
-│  (Discovery Engine API)   │
-│                           │
-│  Each user gets the       │
-│  licenseConfig matching   │
-│  their group's edition    │
-└─────────────────────────┘
+You can easily edit `config.json` using the built-in Cloud Shell Editor. Simply click the **Open Editor** button at the top of your Cloud Shell window, navigate to `config.json`, and define your group mappings:
+
+```json
+{
+  "project_id": "",
+  "project_number": "",
+  "location": "global",
+  "endpoint_location": "global",
+  "delete_unassigned": false,
+  "batch_size": 100,
+  "group_mappings": {
+    "marketing-team@example.com": "YOUR_SUBSCRIPTION_ID"
+  }
+}
 ```
 
-Each Gemini Enterprise subscription has a unique `licenseConfig` path. The script maps each group to its corresponding config, so users in the Plus group get Plus licenses, Standard group members get Standard licenses, and so on.
+> **Note:** Leave `project_id` and `project_number` as empty strings `""` and the script will automatically discover them from your Cloud Shell environment.
 
-## Files in This Repo
+### 4. Find Your Subscription IDs
 
-| File | Purpose |
-|------|---------|
-| `gemini-license-sync.sh` | Main sync script — reads group membership and assigns licenses |
-| `gemini-helpers.sh` | Helper utilities — discover subscription IDs, check prerequisites, list assigned licenses |
-| `config.json.example` | Configuration template — copy to `config.json` and fill in your values |
-| `.gitignore` | Prevents committing `config.json` (secrets) and log files |
-| `README.md` | This file |
-
-## Prerequisites
-
-- **Google Cloud SDK** (`gcloud`) installed and authenticated
-- **Bash 4.0+** (for associative arrays — macOS users may need `brew install bash`)
-- **IAM permissions** on the target project:
-  - `discoveryengine.userLicenses.batchUpdate` (or Discovery Engine Admin role)
-  - Billing Account Administrator (to manage subscriptions)
-- **Cloud Identity API** enabled (for group membership queries)
-- **Active Gemini Enterprise subscriptions** for each edition you want to assign (Frontline, Standard, Plus)
-- The authenticated user must have permission to list group memberships
-
-Run `./gemini-helpers.sh check-prereqs` to verify your environment is ready.
-
-## Setup
-
-### 1. Find Your Subscription IDs
-
-Each edition has a unique subscription ID. You can find these in the Cloud Console under **Gemini Enterprise → Manage Subscriptions**, or use the helper script:
+If you don't know your subscription IDs, you can list them via:
 
 ```bash
 ./gemini-helpers.sh list-configs
 ```
 
-You can also look up your numeric project number:
-
-```bash
-./gemini-helpers.sh get-project-number
-```
-
-### 2. Create Your Google Groups
-
-Create one group per edition in Google Workspace Admin or Cloud Identity:
-
-| Group | Purpose |
-|-------|---------| 
-| `gemini-ent-plus@yourdomain.com` | Users who should receive **Plus** licenses |
-| `gemini-ent-standard@yourdomain.com` | Users who should receive **Standard** licenses |
-| `gemini-ent-frontline@yourdomain.com` | Users who should receive **Frontline** licenses |
-
-Use whatever naming convention works for your org. The group emails are configurable.
-
-### 3. Configure
-
-Copy the example config and fill in your values:
-
-```bash
-cp config.json.example config.json
-```
-
-Edit `config.json` with your project details and group-to-subscription mappings:
-
-```bash
-PROJECT_ID="my-gcp-project"
-PROJECT_NUMBER="123456789012"
-LOCATION="global"
-ENDPOINT_LOCATION="global"
-
-GROUP_1_EMAIL="gemini-ent-plus@yourdomain.com"
-GROUP_1_SUBSCRIPTION="your-plus-subscription-id"
-
-GROUP_2_EMAIL="gemini-ent-standard@yourdomain.com"
-GROUP_2_SUBSCRIPTION="your-standard-subscription-id"
-
-GROUP_3_EMAIL="gemini-ent-frontline@yourdomain.com"
-GROUP_3_SUBSCRIPTION="your-frontline-subscription-id"
-```
-
-> **Note:** `PROJECT_NUMBER` is the numeric project number, not the alphanumeric project ID. Find it via `./gemini-helpers.sh get-project-number` or `gcloud projects describe $PROJECT_ID --format="value(projectNumber)"`.
-
-Alternatively, you can skip the `config.json` file and edit the `GROUP_MAP` directly inside `gemini-license-sync.sh`.
-
-### 4. Preview with Dry Run
+### 5. Preview with Dry Run
 
 Before making any changes, preview what the script would do:
 
@@ -172,7 +83,7 @@ Before making any changes, preview what the script would do:
 
 This fetches group members and logs all actions without making any API calls to assign licenses.
 
-### 5. Run the Sync
+### 6. Run the Sync
 
 ```bash
 chmod +x gemini-license-sync.sh gemini-helpers.sh
@@ -180,6 +91,16 @@ chmod +x gemini-license-sync.sh gemini-helpers.sh
 ```
 
 The script logs all operations to a timestamped log file (`gemini-license-sync-YYYYMMDD-HHMMSS.log`).
+
+## Local Execution (Optional)
+
+If you prefer to run this script locally on your own terminal instead of Cloud Shell, you will need to manually set `project_id` and `project_number` in `config.json`.
+
+You can find your numeric project number by running:
+
+```bash
+./gemini-helpers.sh get-project-number my-gcp-project
+```
 
 ## Configuration Options
 

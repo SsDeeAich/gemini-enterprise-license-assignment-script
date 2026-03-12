@@ -14,16 +14,19 @@
 
 set -euo pipefail
 
-# Load config from .env if present, otherwise fall back to defaults
+# Load config from config.json if present
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-if [ -f "${SCRIPT_DIR}/.env" ]; then
-  # shellcheck disable=SC1091
-  source "${SCRIPT_DIR}/.env"
-fi
+CONFIG_FILE="${SCRIPT_DIR}/config.json"
 
-PROJECT_ID="${PROJECT_ID:-your-project-id}"
-LOCATION="${LOCATION:-global}"
-ENDPOINT_LOCATION="${ENDPOINT_LOCATION:-global}"
+if command -v jq &>/dev/null && [ -f "$CONFIG_FILE" ]; then
+  PROJECT_ID=$(jq -r '.project_id // ""' "$CONFIG_FILE" 2>/dev/null || echo "")
+  LOCATION=$(jq -r '.location // "global"' "$CONFIG_FILE" 2>/dev/null || echo "global")
+  ENDPOINT_LOCATION=$(jq -r '.endpoint_location // "global"' "$CONFIG_FILE" 2>/dev/null || echo "global")
+else
+  PROJECT_ID=""
+  LOCATION="global"
+  ENDPOINT_LOCATION="global"
+fi
 
 # --- Helpers ---
 
@@ -56,10 +59,16 @@ _require_auth() {
 }
 
 _require_config() {
-  if [ "$PROJECT_ID" = "your-project-id" ]; then
-    echo "ERROR: PROJECT_ID is still set to the placeholder value."
-    echo "       Create a .env file (see .env.example) or pass PROJECT_ID as an env var."
-    exit 1
+  # Auto-discover PROJECT_ID if empty
+  if [ -z "$PROJECT_ID" ] || [ "$PROJECT_ID" = "your-project-id" ]; then
+    PROJECT_ID=$(gcloud config get-value project 2>/dev/null || echo "")
+    if [ -z "$PROJECT_ID" ]; then
+      echo "  ERROR: Could not auto-discover PROJECT_ID."
+      echo "         Please set it in config.json or run: gcloud config set project YOUR_PROJECT"
+      exit 1
+    else
+      echo "  ℹ Auto-discovered Project ID: $PROJECT_ID"
+    fi
   fi
 }
 
@@ -135,8 +144,8 @@ cmd_get_project_number() {
   }
   echo "  Project Number: ${number}"
   echo ""
-  echo "  Add this to your .env file:"
-  echo "    PROJECT_NUMBER=\"${number}\""
+  echo "  Add this to your config.json file (optional if running in Cloud Shell):"
+  echo "    \"project_number\": \"${number}\""
 }
 
 cmd_list_configs() {
@@ -195,7 +204,7 @@ usage() {
   echo "  list-licenses       List currently assigned user licenses"
   echo ""
   echo "Configuration:"
-  echo "  Create a .env file (see .env.example) or export PROJECT_ID, LOCATION, etc."
+  echo "  Create a config.json file (see config.json.example) or if running in Cloud Shell, you can skip configuring the project details."
 }
 
 case "${1:-}" in
