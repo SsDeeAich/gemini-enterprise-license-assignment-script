@@ -17,6 +17,22 @@ This script bridges Google Groups and the Gemini Enterprise Discovery Engine API
 
 This gives you group-based license management where the group is the single source of truth for each edition tier.
 
+
+### Required IAM Roles & Permissions
+
+To run these scripts, the authenticated user (or service account) must have the following permissions:
+
+1. **Cloud Identity / Workspace Admin Roles**
+   Required to list the members of Google Groups (`gcloud identity groups memberships list`).
+   * **Google Workspace Admin** with Groups Reader privileges, OR
+   * **Groups Admin** role, OR
+   * **Groups Reader** role in Cloud Identity
+
+2. **Google Cloud IAM Roles**
+   Required to query and assign licenses via the Discovery Engine API.
+   * **Discovery Engine Admin** (`roles/discoveryengine.admin`) on the target project, OR
+   * **Discovery Engine Editor** (`roles/discoveryengine.editor`)
+
 ## Quick Start
 
 ```bash
@@ -24,8 +40,8 @@ This gives you group-based license management where the group is the single sour
 ./gemini-helpers.sh check-prereqs
 
 # 2. Copy and fill in your config
-cp .env.example .env
-# Edit .env with your project ID, project number, group emails, and subscription IDs
+cp config.json.example config.json
+# Edit config.json with your project ID, project number, group emails, and subscription IDs
 
 # 3. Find your subscription IDs
 ./gemini-helpers.sh list-configs
@@ -71,8 +87,8 @@ Each Gemini Enterprise subscription has a unique `licenseConfig` path. The scrip
 |------|---------|
 | `gemini-license-sync.sh` | Main sync script — reads group membership and assigns licenses |
 | `gemini-helpers.sh` | Helper utilities — discover subscription IDs, check prerequisites, list assigned licenses |
-| `.env.example` | Configuration template — copy to `.env` and fill in your values |
-| `.gitignore` | Prevents committing `.env` (secrets) and log files |
+| `config.json.example` | Configuration template — copy to `config.json` and fill in your values |
+| `.gitignore` | Prevents committing `config.json` (secrets) and log files |
 | `README.md` | This file |
 
 ## Prerequisites
@@ -121,10 +137,10 @@ Use whatever naming convention works for your org. The group emails are configur
 Copy the example config and fill in your values:
 
 ```bash
-cp .env.example .env
+cp config.json.example config.json
 ```
 
-Edit `.env` with your project details and group-to-subscription mappings:
+Edit `config.json` with your project details and group-to-subscription mappings:
 
 ```bash
 PROJECT_ID="my-gcp-project"
@@ -144,7 +160,7 @@ GROUP_3_SUBSCRIPTION="your-frontline-subscription-id"
 
 > **Note:** `PROJECT_NUMBER` is the numeric project number, not the alphanumeric project ID. Find it via `./gemini-helpers.sh get-project-number` or `gcloud projects describe $PROJECT_ID --format="value(projectNumber)"`.
 
-Alternatively, you can skip the `.env` file and edit the `GROUP_MAP` directly inside `gemini-license-sync.sh`.
+Alternatively, you can skip the `config.json` file and edit the `GROUP_MAP` directly inside `gemini-license-sync.sh`.
 
 ### 4. Preview with Dry Run
 
@@ -193,7 +209,7 @@ Users are processed in chunks to avoid API payload limits. Default is `100`. Adj
 ./gemini-helpers.sh list-licenses         # List currently assigned user licenses
 ```
 
-These commands read configuration from `.env` (if present) or you can export `PROJECT_ID`, `LOCATION`, etc. as environment variables.
+These commands read configuration from `config.json` (if present) or you can export `PROJECT_ID`, `LOCATION`, etc. as environment variables.
 
 ## Scheduling for Ongoing Sync
 
@@ -254,7 +270,7 @@ List all currently assigned licenses to confirm the sync worked:
 
 **Users not gaining access after assignment** — License propagation can take up to 30 minutes. Ensure users also have the Discovery Engine User IAM role on the project.
 
-**Config validation errors** — The script validates configuration before running. If you see placeholder errors, ensure your `.env` file has real values. Run `./gemini-helpers.sh get-project-number` and `./gemini-helpers.sh list-configs` to find the correct values.
+**Config validation errors** — The script validates configuration before running. If you see placeholder errors, ensure your `config.json` file has real values. Run `./gemini-helpers.sh get-project-number` and `./gemini-helpers.sh list-configs` to find the correct values.
 
 ## License
 

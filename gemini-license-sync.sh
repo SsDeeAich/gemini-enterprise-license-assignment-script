@@ -11,7 +11,7 @@
 #   ./gemini-license-sync.sh --dry-run    # Preview changes without making API calls
 #
 # Configuration:
-#   Copy .env.example to .env and fill in your values, or edit the defaults below.
+#   Copy config.json.example to config.json and fill in your values
 # =============================================================================
 
 set -euo pipefail
@@ -36,48 +36,54 @@ for arg in "$@"; do
 done
 
 # === LOAD CONFIG ===
-# Source .env file if it exists (allows config without editing this script)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-if [ -f "${SCRIPT_DIR}/.env" ]; then
-  # shellcheck disable=SC1091
-  source "${SCRIPT_DIR}/.env"
+CONFIG_FILE="${SCRIPT_DIR}/config.json"
+
+if [ ! -f "$CONFIG_FILE" ]; then
+  echo "ERROR: Configuration file not found at ${CONFIG_FILE}"
+  echo "       Please copy config.json.example to config.json and fill in your values."
+  exit 1
 fi
 
-# === CONFIGURATION (defaults — override via .env or environment variables) ===
-PROJECT_ID="${PROJECT_ID:-your-project-id}"
-PROJECT_NUMBER="${PROJECT_NUMBER:-123456789012}"  # Numeric project number (not the ID)
-LOCATION="${LOCATION:-global}"                    # or "us" or "eu"
-ENDPOINT_LOCATION="${ENDPOINT_LOCATION:-global}"  # Must match LOCATION
+if ! command -v jq &>/dev/null; then
+  echo "ERROR: jq is not installed. Please install jq to parse the config file."
+  echo "       macOS: brew install jq"
+  echo "       Linux: sudo apt install jq"
+  exit 1
+fi
+
+# === CONFIGURATION (Parsed from JSON) ===
+PROJECT_ID=$(jq -r '.project_id // "your-project-id"' "$CONFIG_FILE")
+PROJECT_NUMBER=$(jq -r '.project_number // "123456789012"' "$CONFIG_FILE")
+LOCATION=$(jq -r '.location // "global"' "$CONFIG_FILE")
+ENDPOINT_LOCATION=$(jq -r '.endpoint_location // "global"' "$CONFIG_FILE")
+DELETE_UNASSIGNED=$(jq -r '.delete_unassigned // false' "$CONFIG_FILE")
+BATCH_SIZE=$(jq -r '.batch_size // 100' "$CONFIG_FILE")
 
 # Group → Subscription mapping
-# If .env defines GROUP_N_EMAIL / GROUP_N_SUBSCRIPTION pairs, build the map from those.
-# Otherwise, fall back to a hardcoded default map (edit these if not using .env).
-declare -A GROUP_MAP
+GROUP_EMAILS=()
+GROUP_SUBSCRIPTIONS=()
 
-if [ -n "${GROUP_1_EMAIL:-}" ] && [ -n "${GROUP_1_SUBSCRIPTION:-}" ]; then
-  # Build map from .env numbered pairs
-  for i in $(seq 1 20); do
-    email_var="GROUP_${i}_EMAIL"
-    sub_var="GROUP_${i}_SUBSCRIPTION"
-    if [ -n "${!email_var:-}" ] && [ -n "${!sub_var:-}" ]; then
-      GROUP_MAP["${!email_var}"]="${!sub_var}"
-    fi
-  done
-else
-  # Hardcoded defaults — edit these directly if not using .env
-  GROUP_MAP=(
-    ["gemini-ent-frontline@yourdomain.com"]="SUBSCRIPTION_ID_FRONTLINE"
-    ["gemini-ent-standard@yourdomain.com"]="SUBSCRIPTION_ID_STANDARD"
-    ["gemini-ent-plus@yourdomain.com"]="SUBSCRIPTION_ID_PLUS"
+while IFS="=" read -r group sub; do
+  if [ -n "$group" ] && [ -n "$sub" ]; then
+    GROUP_EMAILS+=("$group")
+    GROUP_SUBSCRIPTIONS+=("$sub")
+  fi
+done < <(jq -r '.group_mappings | to_entries | .[] | "\(.key)=\(.value)"' "$CONFIG_FILE" 2>/dev/null || echo "")
+
+# If no mappings found in JSON, fall back to hardcoded defaults for safety
+if [ ${#GROUP_EMAILS[@]} -eq 0 ]; then
+  GROUP_EMAILS=(
+    "gemini-ent-frontline@yourdomain.com"
+    "gemini-ent-standard@yourdomain.com"
+    "gemini-ent-plus@yourdomain.com"
+  )
+  GROUP_SUBSCRIPTIONS=(
+    "SUBSCRIPTION_ID_FRONTLINE"
+    "SUBSCRIPTION_ID_STANDARD"
+    "SUBSCRIPTION_ID_PLUS"
   )
 fi
-
-# Set to "true" to remove licenses from users NOT in the group for that edition
-# WARNING: On first run, keep this "false" to avoid accidentally removing existing users
-DELETE_UNASSIGNED="${DELETE_UNASSIGNED:-false}"
-
-# Batch size — split large groups into chunks to avoid payload limits
-BATCH_SIZE="${BATCH_SIZE:-100}"
 
 # === PREREQUISITE CHECKS ===
 
@@ -110,7 +116,7 @@ validate_config() {
 
   if [ "$PROJECT_ID" = "your-project-id" ]; then
     echo "ERROR: PROJECT_ID is still set to the placeholder value."
-    echo "       Create a .env file (see .env.example) or edit the script."
+    echo "       Edit the config.json file."
     ok=false
   fi
 
@@ -120,14 +126,15 @@ validate_config() {
     ok=false
   fi
 
-  if [ ${#GROUP_MAP[@]} -eq 0 ]; then
+  if [ ${#GROUP_EMAILS[@]} -eq 0 ]; then
     echo "ERROR: No group-to-subscription mappings defined."
     ok=false
   fi
 
   # Check for placeholder subscription IDs
-  for group_email in "${!GROUP_MAP[@]}"; do
-    local sub_id="${GROUP_MAP[$group_email]}"
+  for i in "${!GROUP_EMAILS[@]}"; do
+    local group_email="${GROUP_EMAILS[$i]}"
+    local sub_id="${GROUP_SUBSCRIPTIONS[$i]}"
     if [[ "$sub_id" == SUBSCRIPTION_ID_* ]]; then
       echo "WARNING: Subscription ID for ${group_email} looks like a placeholder: ${sub_id}"
       echo "         Find real IDs via: ./gemini-helpers.sh list-configs"
@@ -229,8 +236,9 @@ log "=========================================="
 TOTAL_ASSIGNED=0
 TOTAL_ERRORS=0
 
-for group_email in "${!GROUP_MAP[@]}"; do
-  subscription_id="${GROUP_MAP[$group_email]}"
+for i in "${!GROUP_EMAILS[@]}"; do
+  group_email="${GROUP_EMAILS[$i]}"
+  subscription_id="${GROUP_SUBSCRIPTIONS[$i]}"
   log ""
   log "Processing group: ${group_email}"
   log "  Subscription ID: ${subscription_id}"
