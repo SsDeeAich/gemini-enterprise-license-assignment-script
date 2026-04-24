@@ -1,248 +1,353 @@
 #!/bin/bash
+
 # =============================================================================
-# Gemini Enterprise License Helpers
-# Discovery and verification utilities for Gemini Enterprise subscriptions
+# Gemini Enterprise License Sync
+# Assigns licenses by edition based on Google Group membership
 #
-# Usage: ./gemini-helpers.sh <command>
+# Maps Google Groups → Gemini Enterprise editions (Frontline, Standard, Plus)
+# Uses the Discovery Engine batchUpdateUserLicenses API
 #
-# Commands:
-#   check-prereqs       Verify gcloud and curl are installed and authenticated
-#   get-project-number  Look up numeric project number from project ID
-#   list-configs        List all license config IDs and edition info
-#   list-licenses       List currently assigned user licenses
+# Usage:
+#   ./gemini-license-sync.sh              # Run the sync
+#   ./gemini-license-sync.sh --dry-run    # Preview changes without making API calls
+#
+# Configuration:
+#   Copy config.json.example to config.json and fill in your values
 # =============================================================================
 
 set -euo pipefail
 
-# Load config from config.json if present
+# === PARSE FLAGS ===
+DRY_RUN=false
+for arg in "$@"; do
+  case "$arg" in
+    --dry-run) DRY_RUN=true ;;
+    --help|-h)
+      echo "Usage: $0 [--dry-run]"
+      echo ""
+      echo "  --dry-run   Preview what would happen without making API calls"
+      exit 0
+      ;;
+    *)
+      echo "Unknown flag: $arg"
+      echo "Usage: $0 [--dry-run]"
+      exit 1
+      ;;
+  esac
+done
+
+# === LOAD CONFIG ===
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONFIG_FILE="${SCRIPT_DIR}/config.json"
 
-if command -v jq &>/dev/null && [ -f "$CONFIG_FILE" ]; then
-  PROJECT_ID=$(jq -r '.project_id // ""' "$CONFIG_FILE" 2>/dev/null || echo "")
-  LOCATION=$(jq -r '.location // "global"' "$CONFIG_FILE" 2>/dev/null || echo "global")
-  ENDPOINT_LOCATION=$(jq -r '.endpoint_location // "global"' "$CONFIG_FILE" 2>/dev/null || echo "global")
-else
-  PROJECT_ID=""
-  LOCATION="global"
-  ENDPOINT_LOCATION="global"
+if [ ! -f "$CONFIG_FILE" ]; then
+  echo "ERROR: Configuration file not found at ${CONFIG_FILE}"
+  echo "       Please copy config.json.example to config.json and fill in your values."
+  exit 1
 fi
 
-# --- Helpers ---
+if ! command -v jq &>/dev/null; then
+  echo "ERROR: jq is not installed. Please install jq to parse the config file."
+  echo "       macOS: brew install jq"
+  echo "       Linux: sudo apt install jq"
+  exit 1
+fi
 
-_header() {
-  echo ""
-  echo "=== $1 ==="
-  echo ""
+# === LOGGING & VISUALS ===
+LOG_FILE="gemini-license-sync-$(date +%Y%m%d-%H%M%S).log"
+
+# ANSI Colors
+C_RESET="\033[0m"
+C_GREEN="\033[1;32m"
+C_RED="\033[1;31m"
+C_BLUE="\033[1;34m"
+C_YELLOW="\033[1;33m"
+C_CYAN="\033[1;36m"
+C_BOLD="\033[1m"
+
+log() {
+  local level="$1"
+  shift
+  local color=""
+  local prefix=""
+  
+  case "$level" in
+    SUCCESS) color="$C_GREEN"; prefix="  ✓ " ;;
+    ERROR)   color="$C_RED"; prefix="  ✗ " ;;
+    INFO)    color="$C_BLUE"; prefix="  ℹ " ;;
+    WARN)    color="$C_YELLOW"; prefix="  ⚠ " ;;
+    HEADER)  color="$C_CYAN$C_BOLD"; prefix="" ;;
+    *)       color="$C_RESET"; prefix="    " ;; # Default/None
+  esac
+
+  echo -e "${color}${prefix}$*${C_RESET}"
+  # Strip ANSI codes for the log file
+  echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | sed 's/\x1b\[[0-9;]*m//g' >> "$LOG_FILE"
 }
 
-_require_gcloud() {
-  if ! command -v gcloud &>/dev/null; then
-    echo "ERROR: gcloud is not installed. Install the Google Cloud SDK first."
-    echo "       https://cloud.google.com/sdk/docs/install"
-    exit 1
+# === CONFIGURATION (Parsed from JSON) ===
+PROJECT_ID=$(jq -r '.project_id // ""' "$CONFIG_FILE")
+PROJECT_NUMBER=$(jq -r '.project_number // ""' "$CONFIG_FILE")
+LOCATION=$(jq -r '.location // "global"' "$CONFIG_FILE")
+ENDPOINT_LOCATION=$(jq -r '.endpoint_location // "global"' "$CONFIG_FILE")
+DELETE_UNASSIGNED=$(jq -r '.delete_unassigned // false' "$CONFIG_FILE")
+BATCH_SIZE=$(jq -r '.batch_size // 100' "$CONFIG_FILE")
+
+# Group → Subscription mapping
+GROUP_EMAILS=()
+GROUP_SUBSCRIPTIONS=()
+
+while IFS="=" read -r group sub; do
+  if [ -n "$group" ] && [ -n "$sub" ]; then
+    GROUP_EMAILS+=("$group")
+    GROUP_SUBSCRIPTIONS+=("$sub")
   fi
-}
+done < <(jq -r '.group_mappings | to_entries | .[] | "\(.key)=\(.value)"' "$CONFIG_FILE" 2>/dev/null || echo "")
 
-_require_curl() {
+# If no mappings found in JSON, fall back to hardcoded defaults for safety
+if [ ${#GROUP_EMAILS[@]} -eq 0 ]; then
+  GROUP_EMAILS=(
+    "gemini-ent-frontline@yourdomain.com"
+    "gemini-ent-standard@yourdomain.com"
+    "gemini-ent-plus@yourdomain.com"
+  )
+  GROUP_SUBSCRIPTIONS=(
+    "SUBSCRIPTION_ID_FRONTLINE"
+    "SUBSCRIPTION_ID_STANDARD"
+    "SUBSCRIPTION_ID_PLUS"
+  )
+fi
+
+# === PREREQUISITE CHECKS ===
+
+check_prereqs() {
+  local ok=true
+
+  if ! command -v gcloud &>/dev/null; then
+    echo "ERROR: gcloud is not installed. Install the Google Cloud SDK:"
+    echo "       https://cloud.google.com/sdk/docs/install"
+    ok=false
+  fi
+
   if ! command -v curl &>/dev/null; then
     echo "ERROR: curl is not installed."
+    ok=false
+  fi
+
+  if [ "$ok" = false ]; then
     exit 1
   fi
-}
 
-_require_auth() {
-  if ! gcloud auth print-access-token &>/dev/null; then
+  if ! gcloud auth print-access-token &>/dev/null 2>&1; then
     echo "ERROR: gcloud is not authenticated. Run: gcloud auth login"
     exit 1
   fi
 }
 
-_require_config() {
-  # Auto-discover PROJECT_ID if empty
-  if [ -z "$PROJECT_ID" ] || [ "$PROJECT_ID" = "your-project-id" ]; then
-    PROJECT_ID=$(gcloud config get-value project 2>/dev/null || echo "")
-    if [ -z "$PROJECT_ID" ]; then
-      echo "  ERROR: Could not auto-discover PROJECT_ID."
-      echo "         Please set it in config.json or run: gcloud config set project YOUR_PROJECT"
-      exit 1
-    else
-      echo "  ℹ Auto-discovered Project ID: $PROJECT_ID"
-    fi
-  fi
-}
-
-# --- Commands ---
-
-cmd_check_prereqs() {
-  _header "Checking prerequisites"
-
+validate_config() {
   local ok=true
 
-  printf "  gcloud CLI ........... "
-  if command -v gcloud &>/dev/null; then
-    echo "✓ $(gcloud version 2>/dev/null | head -1)"
-  else
-    echo "✗ NOT FOUND"
-    ok=false
-  fi
-
-  printf "  curl ................. "
-  if command -v curl &>/dev/null; then
-    echo "✓ installed"
-  else
-    echo "✗ NOT FOUND"
-    ok=false
-  fi
-
-  printf "  python3 .............. "
-  if command -v python3 &>/dev/null; then
-    echo "✓ installed (optional, for JSON formatting)"
-  else
-    echo "- not found (optional)"
-  fi
-
-  printf "  jq ................... "
-  if command -v jq &>/dev/null; then
-    echo "✓ installed"
-  else
-    echo "✗ NOT FOUND (required for formatting configs)"
-    ok=false
-  fi
-
-  printf "  gcloud auth .......... "
-  if gcloud auth print-access-token &>/dev/null 2>&1; then
-    local account
-    account=$(gcloud config get-value account 2>/dev/null)
-    echo "✓ authenticated as ${account}"
-  else
-    echo "✗ NOT AUTHENTICATED — run: gcloud auth login"
-    ok=false
-  fi
-
-  echo ""
-  
-  if [ "$ok" = true ] && [ -n "$PROJECT_ID" ]; then
-    printf "  IAM Permissions ...... "
-    local account
-    account=$(gcloud config get-value account 2>/dev/null)
-    local roles
-    roles=$(gcloud projects get-iam-policy "$PROJECT_ID" \
-      --flatten="bindings[].members" \
-      --format="value(bindings.role)" \
-      --filter="bindings.members:$account" 2>/dev/null)
-    
-    if echo "$roles" | grep -E 'roles/discoveryengine\.(admin|editor)' >/dev/null; then
-      echo "✓ valid (Discovery Engine Admin/Editor)"
+  # Auto-discover PROJECT_ID if empty
+  if [ -z "$PROJECT_ID" ] || [ "$PROJECT_ID" = "your-project-id" ]; then
+    log INFO "Project ID not provided in config.json. Attempting auto-discovery..."
+    PROJECT_ID=$(gcloud config get-value project 2>/dev/null || echo "")
+    if [ -z "$PROJECT_ID" ]; then
+      log ERROR "Could not auto-discover PROJECT_ID."
+      log ERROR "Please set it in config.json or run: gcloud config set project YOUR_PROJECT"
+      ok=false
     else
-      echo "⚠ WARNING: Could not verify 'roles/discoveryengine.admin' for $account."
-      echo "             Assignments may fail if you lack permissions."
+      log SUCCESS "Auto-discovered Project ID: $PROJECT_ID"
     fi
-    echo ""
   fi
 
-  if [ "$ok" = true ]; then
-    echo "All prerequisites met ✓"
-  else
-    echo "Some prerequisites are missing — see above."
+  # Auto-discover PROJECT_NUMBER if empty
+  if [ -z "$PROJECT_NUMBER" ] || [ "$PROJECT_NUMBER" = "123456789012" ]; then
+    if [ -n "$PROJECT_ID" ]; then
+      log INFO "Project Number not provided in config.json. Attempting auto-discovery..."
+      PROJECT_NUMBER=$(gcloud projects describe "$PROJECT_ID" --format="value(projectNumber)" 2>/dev/null || echo "")
+      if [ -z "$PROJECT_NUMBER" ]; then
+        log ERROR "Could not auto-discover PROJECT_NUMBER for project $PROJECT_ID."
+        log ERROR "Check your IAM permissions or set it manually in config.json."
+        ok=false
+      else
+        log SUCCESS "Auto-discovered Project Number: $PROJECT_NUMBER"
+      fi
+    else
+      ok=false
+    fi
+  fi
+
+  if [ ${#GROUP_EMAILS[@]} -eq 0 ]; then
+    log ERROR "No group-to-subscription mappings defined."
+    ok=false
+  fi
+
+  # Check for placeholder subscription IDs
+  for i in "${!GROUP_EMAILS[@]}"; do
+    local group_email="${GROUP_EMAILS[$i]}"
+    local sub_id="${GROUP_SUBSCRIPTIONS[$i]}"
+    if [[ "$sub_id" == SUBSCRIPTION_ID_* ]]; then
+      log WARN "Subscription ID for ${group_email} looks like a placeholder: ${sub_id}"
+      log WARN "Find real IDs via: ./gemini-helpers.sh list-configs"
+      ok=false
+    fi
+  done
+
+  if [ "$ok" = false ]; then
     exit 1
   fi
 }
 
-cmd_get_project_number() {
-  _header "Looking up project number"
-  _require_gcloud
-  _require_auth
+# Check prereqs before validation so gcloud commands work
+check_prereqs
+validate_config
 
-  local pid="${1:-$PROJECT_ID}"
-  _require_config
 
-  echo "  Project ID: ${pid}"
-  local number
-  number=$(gcloud projects describe "$pid" --format="value(projectNumber)" 2>/dev/null) || {
-    echo "  ERROR: Could not retrieve project number. Check the project ID and your permissions."
-    exit 1
-  }
-  echo "  Project Number: ${number}"
-  echo ""
-  echo "  Add this to your config.json file (optional if running in Cloud Shell):"
-  echo "    \"project_number\": \"${number}\""
+
+# === CACHE ACCESS TOKEN ===
+# Fetch once and reuse — avoids repeated gcloud calls and mid-run expiry risk
+ACCESS_TOKEN="$(gcloud auth print-access-token)"
+
+# === FUNCTIONS ===
+
+get_group_members() {
+  local group_email="$1"
+  gcloud identity groups memberships list \
+    --group-email="${group_email}" \
+    --format="value(preferredMemberKey.id)"
 }
 
-cmd_list_configs() {
-  _header "Listing license configs (subscription IDs)"
-  _require_gcloud
-  _require_curl
-  _require_auth
-  _require_config
+assign_licenses_batch() {
+  local subscription_id="$1"
+  shift
+  local emails=("$@")
 
-  if command -v jq &>/dev/null; then
-    curl -s -X GET \
-      -H "Authorization: Bearer $(gcloud auth print-access-token)" \
-      -H "Content-Type: application/json" \
-      -H "X-Goog-User-Project: ${PROJECT_ID}" \
-      "https://${ENDPOINT_LOCATION}-discoveryengine.googleapis.com/v1/projects/${PROJECT_ID}/locations/${LOCATION}/userStores/default_user_store/licenseConfigsUsageStats" \
-      | jq -r '.licenseConfigUsageStats[]? | .licenseConfig | split("/") | last'
-    
-    echo ""
-    echo "  (Copy/paste the exact strings above into your config.json group_mappings)"
-  else
-    # Fallback to raw output if jq is somehow missing despite prereq checks
-    curl -s -X GET \
-      -H "Authorization: Bearer $(gcloud auth print-access-token)" \
-      -H "Content-Type: application/json" \
-      -H "X-Goog-User-Project: ${PROJECT_ID}" \
-      "https://${ENDPOINT_LOCATION}-discoveryengine.googleapis.com/v1/projects/${PROJECT_ID}/locations/${LOCATION}/userStores/default_user_store/licenseConfigsUsageStats"
-  fi
-}
+  # Build userLicenses JSON array
+  local license_config="projects/${PROJECT_NUMBER}/locations/${LOCATION}/licenseConfig/${subscription_id}"
+  local user_licenses=""
 
-cmd_list_licenses() {
-  _header "Listing currently assigned user licenses"
-  _require_gcloud
-  _require_curl
-  _require_auth
-  _require_config
+  for email in "${emails[@]}"; do
+    if [ -n "$email" ]; then
+      user_licenses="${user_licenses}{\"userPrincipal\":\"${email}\",\"licenseConfig\":\"${license_config}\"},"
+    fi
+  done
 
-  local formatter="cat"
-  if command -v jq &>/dev/null; then
-    formatter="jq ."
-  elif command -v python3 &>/dev/null; then
-    formatter="python3 -m json.tool"
+  # Remove trailing comma
+  user_licenses="${user_licenses%,}"
+
+  if [ "$DRY_RUN" = true ]; then
+    log NONE "[DRY RUN] Would assign ${#emails[@]} licenses with config: ${subscription_id}"
+    return 0
   fi
 
-  curl -s -X GET \
-    -H "Authorization: Bearer $(gcloud auth print-access-token)" \
+  # Call batchUpdateUserLicenses
+  local response
+  response=$(curl -s -w "\n%{http_code}" -X POST \
+    -H "Authorization: Bearer ${ACCESS_TOKEN}" \
     -H "Content-Type: application/json" \
     -H "X-Goog-User-Project: ${PROJECT_ID}" \
-    "https://${ENDPOINT_LOCATION}-discoveryengine.googleapis.com/v1/projects/${PROJECT_ID}/locations/${LOCATION}/userStores/default_user_store/userLicenses" \
-    | $formatter
+    "https://${ENDPOINT_LOCATION}-discoveryengine.googleapis.com/v1/projects/${PROJECT_ID}/locations/${LOCATION}/userStores/default_user_store:batchUpdateUserLicenses" \
+    -d "{
+      \"inlineSource\": {
+        \"userLicenses\": [${user_licenses}],
+        \"updateMask\": {
+          \"paths\": [\"userPrincipal\", \"licenseConfig\"]
+        }
+      },
+      \"deleteUnassignedUserLicenses\": ${DELETE_UNASSIGNED}
+    }")
+
+  local http_code
+  http_code=$(echo "$response" | tail -n1)
+  local body
+  body=$(echo "$response" | sed '$d')
+
+  if [[ "$http_code" =~ ^2 ]]; then
+    log SUCCESS "Batch assigned successfully (HTTP ${http_code})"
+    return 0
+  else
+    log ERROR "Batch failed (HTTP ${http_code}): ${body}"
+    return 1
+  fi
 }
 
-# --- Dispatch ---
+# === MAIN ===
 
-usage() {
-  echo "Usage: $0 <command>"
-  echo ""
-  echo "Commands:"
-  echo "  check-prereqs       Verify gcloud, curl, and authentication"
-  echo "  get-project-number  Look up numeric project number from project ID"
-  echo "  list-configs        List license config IDs and edition info"
-  echo "  list-licenses       List currently assigned user licenses"
-  echo ""
-  echo "Configuration:"
-  echo "  Create a config.json file (see config.json.example) or if running in Cloud Shell, you can skip configuring the project details."
-}
+echo ""
+log HEADER "=========================================="
+if [ "$DRY_RUN" = true ]; then
+  log WARN "*** DRY RUN MODE — no changes will be made ***"
+fi
+log HEADER "Gemini Enterprise License Sync Starting"
+log NONE "Project: ${PROJECT_ID} | Location: ${LOCATION}"
+log NONE "Delete unassigned: ${DELETE_UNASSIGNED}"
+log HEADER "=========================================="
 
-case "${1:-}" in
-  check-prereqs)      cmd_check_prereqs ;;
-  get-project-number) shift; cmd_get_project_number "$@" ;;
-  list-configs)       cmd_list_configs ;;
-  list-licenses)      cmd_list_licenses ;;
-  help|--help|-h)     usage ;;
-  *)
-    echo "Unknown command: ${1:-<none>}"
-    echo ""
-    usage
-    exit 1
-    ;;
-esac
+TOTAL_ASSIGNED=0
+TOTAL_ERRORS=0
+
+for i in "${!GROUP_EMAILS[@]}"; do
+  group_email="${GROUP_EMAILS[$i]}"
+  subscription_id="${GROUP_SUBSCRIPTIONS[$i]}"
+  log HEADER ""
+  log HEADER "Processing group: ${group_email}"
+  log NONE "  Subscription ID: ${subscription_id}"
+
+  # Fetch group members
+  members_raw=$(get_group_members "$group_email")
+  fetch_status=$?
+
+  if [ $fetch_status -ne 0 ]; then
+    log ERROR "Failed to fetch members for $group_email. See gcloud error above."
+    TOTAL_ERRORS=$((TOTAL_ERRORS + 1))
+    continue
+  fi
+
+  # Convert to array (compatible with both bash 3.2+ and Cloud Shell)
+  members=()
+  while IFS= read -r line; do
+    [ -n "$line" ] && members+=("$line")
+  done <<< "$members_raw"
+
+  member_count=${#members[@]}
+  if [ "$member_count" -eq 0 ]; then
+    log WARN "No members found in group — skipping"
+    continue
+  fi
+
+  log INFO "Found ${member_count} members"
+
+  # Process in batches
+  for ((j = 0; j < member_count; j += BATCH_SIZE)); do
+    batch=("${members[@]:j:BATCH_SIZE}")
+    batch_num=$(( (j / BATCH_SIZE) + 1 ))
+    total_batches=$(( (member_count + BATCH_SIZE - 1) / BATCH_SIZE ))
+
+    log INFO "Assigning batch ${batch_num}/${total_batches} (${#batch[@]} users)..."
+    if assign_licenses_batch "$subscription_id" "${batch[@]}"; then
+      TOTAL_ASSIGNED=$((TOTAL_ASSIGNED + ${#batch[@]}))
+    else
+      TOTAL_ERRORS=$((TOTAL_ERRORS + 1))
+    fi
+
+    if [ "$batch_num" -lt "$total_batches" ]; then
+      sleep 1
+    fi
+  done
+done
+
+echo ""
+log HEADER "=========================================="
+log HEADER "Sync complete."
+log SUCCESS "Users assigned:  ${TOTAL_ASSIGNED}"
+log ERROR   "Batch errors:    ${TOTAL_ERRORS}"
+if [ "$DRY_RUN" = true ]; then
+  log WARN "*** This was a dry run — no changes were made ***"
+fi
+log INFO "Log saved to: ${LOG_FILE}"
+log HEADER "=========================================="
+
+# Exit with non-zero if there were errors
+if [ "$TOTAL_ERRORS" -gt 0 ]; then
+  exit 1
+fi
