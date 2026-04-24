@@ -182,7 +182,7 @@ cmd_list_configs() {
       -H "Content-Type: application/json" \
       -H "X-Goog-User-Project: ${PROJECT_ID}" \
       "https://${ENDPOINT_LOCATION}-discoveryengine.googleapis.com/v1/projects/${PROJECT_ID}/locations/${LOCATION}/userStores/default_user_store/licenseConfigsUsageStats" \
-      | jq -r '.licenseConfigsUsageStats[]? | .licenseConfig | split("/") | last'
+      | jq -r '.licenseConfigUsageStats[]? | .licenseConfig | split("/") | last'
     
     echo ""
     echo "  (Copy/paste the exact strings above into your config.json group_mappings)"
