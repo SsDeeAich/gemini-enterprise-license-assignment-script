@@ -223,7 +223,7 @@ assign_licenses_batch() {
   local emails=("$@")
 
   # Build userLicenses JSON array
-  local license_config="projects/${PROJECT_NUMBER}/locations/${LOCATION}/licenseConfigs/${subscription_id}"
+  local license_config="projects/${PROJECT_NUMBER}/locations/${LOCATION}/licenseConfig/${subscription_id}"
   local user_licenses=""
 
   for email in "${emails[@]}"; do
