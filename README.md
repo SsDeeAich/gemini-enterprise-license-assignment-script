@@ -68,9 +68,29 @@ Required to query and assign licenses via the Discovery Engine API.
 * **Discovery Engine Admin** (`roles/discoveryengine.admin`) on the target project, OR
 * **Discovery Engine Editor** (`roles/discoveryengine.editor`)
 
-## Quick Start (Cloud Shell)
+## Quick Start (guided setup)
 
-This script is optimized to run inside Google Cloud Shell. When run in Cloud Shell, it automatically discovers your current project ID and project number, meaning **zero project configuration is required**—you only need to define your group mappings!
+The fastest way to get going is the interactive wizard. Run the script with no
+config and it walks you through everything — project, editions, group mappings,
+revocation policy — then offers a dry run before touching anything:
+
+```bash
+./gemini-license-sync.sh --setup
+```
+
+The wizard auto-detects your project, lists your license editions, shows the
+member count for each group you enter, writes `config.json` for you, and lets you
+preview with a dry run. If you run `./gemini-license-sync.sh` with no `config.json`
+in a terminal, the wizard launches automatically.
+
+For cron/non-interactive use, pass `--no-input` so a missing `config.json` fails
+fast instead of prompting.
+
+## Manual Setup (Cloud Shell)
+
+If you'd rather write the config by hand: the script auto-discovers your project
+ID and project number in Cloud Shell, so you only need to define your group
+mappings.
 
 ```bash
 # 1. Verify your environment is ready
@@ -99,6 +119,12 @@ You can easily edit `config.json` using the built-in Cloud Shell Editor. Simply 
 ```
 
 > **Note:** Leave `project_id` and `project_number` as empty strings `""` and the script will automatically discover them from your Cloud Shell environment.
+
+> **Tip:** If your project has a **single** license config, you can set the subscription value to `"auto"` and the script will resolve it at startup — so the only thing you configure is the group email:
+> ```json
+> { "group_mappings": { "your-group@example.com": "auto" } }
+> ```
+> With multiple editions, `"auto"` is ambiguous; the script lists the available configs and exits so you can set explicit IDs.
 
 ### 4. Find Your Subscription IDs
 
@@ -140,18 +166,30 @@ You can find your numeric project number by running:
 
 ### `DELETE_UNASSIGNED`
 
-Controls whether users **not** in the group payload lose their license for that edition.
+Controls whether the group becomes the authoritative source for each edition — i.e. whether users who left a group have their license revoked.
 
 | Value | Behavior |
 |-------|----------|
-| `false` (default) | Only adds/updates licenses. Existing users not in the group keep their licenses. Safe for first runs. |
-| `true` | Removes licenses from users not present in the group for that edition. Makes the group the authoritative source. |
+| `false` (default) | Only adds/updates licenses. Users who left a group keep their license. Safe for first runs. |
+| `true` | After assigning, the script lists all currently assigned licenses, and for each managed edition revokes any user assigned to that edition who is no longer in its group. |
 
-> **Warning:** On your first run, keep this `false` until you've verified the script assigns correctly. Flipping to `true` prematurely could revoke licenses from existing users who aren't yet in the group.
+When `true`, the script reconciles rather than blindly deleting:
+
+- Only editions listed in `group_mappings` are ever touched. Licenses from configs the script doesn't manage are left alone.
+- An edition is only reconciled if its group was fetched successfully. If a group lookup fails (e.g. a permissions error), that edition is skipped entirely so a transient error can never trigger a mass revoke.
+- If a group is fetched successfully but is **empty**, every license for that edition is revoked — an empty group means "nobody should have this edition."
+
+> **Warning:** On your first run, keep this `false` until you've verified assignments with `./gemini-helpers.sh list-licenses`. Revocation is immediate — a user loses access as soon as their license is revoked.
 
 ### `BATCH_SIZE`
 
 Users are processed in chunks to avoid API payload limits. Default is `100`. Adjust if you encounter issues with very large groups.
+
+### `location` / `endpoint_location`
+
+Licenses are tied to a specific **multi-region**. `global`, `us`, and `eu` always work; additional multi-regions (e.g. `ca` for Canada, `au` for Australia) are whitelisted per project/customer. Use the multi-region *code* (`ca`), not a region name (`northamerica-northeast1`, which is not valid here). A single run targets one region.
+
+The `--setup` wizard probes the common multi-regions to auto-detect where your subscriptions live, and offers a manual-entry option for whitelisted regions it can't see. When editing `config.json` by hand, set `location` and `endpoint_location` to the multi-region shown in the Cloud console under **Location**.
 
 ## Helper Script
 
@@ -184,7 +222,7 @@ On any machine with `gcloud` authenticated:
 **Systemd timer:**
 For more robust scheduling on Linux servers.
 
-When running on a schedule, consider setting `DELETE_UNASSIGNED="true"` so that removing a user from the group automatically revokes their license.
+When running on a schedule, consider setting `delete_unassigned` to `true` in `config.json` so that removing a user from a group automatically revokes their license on the next run.
 
 ## API Reference
 
