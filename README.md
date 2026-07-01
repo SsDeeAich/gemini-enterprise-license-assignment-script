@@ -1,5 +1,7 @@
 # Gemini Enterprise License Assignment Script
 
+<img width="566" height="297" alt="Screenshot 2026-07-01 at 4 53 26 PM" src="https://github.com/user-attachments/assets/b2c6e3f5-4136-4976-9a67-2456e9cf3577" />
+
 ## The Problem
 
 Gemini Enterprise does not support group-based license assignment natively currently. The console and API require individual email addresses, and the auto-assign feature only works for a single edition — it can't differentiate between Frontline, Standard, and Plus users.
