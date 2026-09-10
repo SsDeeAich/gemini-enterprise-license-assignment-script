@@ -47,9 +47,13 @@ Source of truth is the discovery doc: `https://discoveryengine.googleapis.com/$d
 
 ## Conventions
 
-- Target bash 3.2+ (macOS) and Cloud Shell — no associative arrays. Reconcile state is kept
-  in a temp file of `configId<TAB>email` lines (plus a `configId<TAB>` marker per
-  successfully-fetched group) and diffed with `comm`/`awk`.
+- Target bash 3.2+ (macOS) and Cloud Shell — no associative arrays. State is kept in temp
+  files (`CURRENT_LICENSES_FILE` and `DESIRED_FILE`) of `userPrincipal<TAB>configId` and
+  `configId<TAB>email` lines, diffed with `comm`/`awk` under strict `LC_ALL=C` collation.
+- License assignment computes a delta via `comm -23` so only users lacking the target
+  edition are sent to `batchUpdateUserLicenses`.
+- Reconcile safety: users moving between editions (or present in any configured group) are
+  cross-checked against all desired members and guarded from revocation.
 - Runs under `set -euo pipefail`: never rely on `$?` after a bare `var=$(...)` assignment —
   branch on the command directly.
 - Always support `--dry-run`.

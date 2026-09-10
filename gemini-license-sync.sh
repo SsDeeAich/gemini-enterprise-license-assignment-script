@@ -305,9 +305,16 @@ get_all_assigned_licenses() {
       --data-urlencode "filter=license_assignment_state = ASSIGNED" \
       ${token:+--data-urlencode "pageToken=${token}"})
 
+    if echo "$resp" | jq -e '.error' >/dev/null 2>&1; then
+      local err_msg
+      err_msg=$(echo "$resp" | jq -r '.error.message // "Unknown API error"')
+      log ERROR "Failed to fetch assigned licenses: ${err_msg}" >&2
+      return 1
+    fi
+
     echo "$resp" | jq -r '.userLicenses[]?
       | select(.licenseConfig != null and .licenseConfig != "")
-      | [.userPrincipal, (.licenseConfig | split("/") | last)] | @tsv'
+      | [(.userPrincipal | ascii_downcase), (.licenseConfig | split("/") | last)] | @tsv'
 
     token=$(echo "$resp" | jq -r '.nextPageToken // ""')
     [ -z "$token" ] && break
@@ -667,16 +674,25 @@ resolve_subscriptions
 TOTAL_ASSIGNED=0
 TOTAL_REVOKED=0
 TOTAL_ERRORS=0
+TOTAL_MEMBERS_CHECKED=0
+TOTAL_ALREADY_ASSIGNED=0
 
-# Records "configId<TAB>email" for every desired assignment. Also records a
-# "configId<TAB>" marker per successfully-fetched group so the reconcile phase
-# knows which editions are safe to revoke from (a failed fetch is never recorded,
-# so a transient gcloud error can never trigger a mass revoke).
-DESIRED_FILE=""
-if [ "$DELETE_UNASSIGNED" = true ]; then
-  DESIRED_FILE=$(mktemp)
-  trap 'rm -f "$DESIRED_FILE"' EXIT
+# Temp files for desired assignments and current license snapshot.
+# DESIRED_FILE records "configId<TAB>email" for every desired assignment and
+# "configId<TAB>" marker per successfully-fetched group so reconcile knows
+# which editions are safe to revoke from.
+DESIRED_FILE=$(mktemp)
+CURRENT_LICENSES_FILE=$(mktemp)
+trap 'rm -f "$DESIRED_FILE" "$CURRENT_LICENSES_FILE"' EXIT
+
+log INFO "Fetching current license assignments..."
+if ! get_all_assigned_licenses > "$CURRENT_LICENSES_FILE"; then
+  log WARN "Could not fetch current license assignments. Will fallback to assigning all group members."
+  : > "$CURRENT_LICENSES_FILE"
 fi
+
+initial_assigned_count=$(awk 'NF' "$CURRENT_LICENSES_FILE" | wc -l | tr -d ' ')
+log INFO "Found ${initial_assigned_count} currently assigned license(s) across project."
 
 for i in "${!GROUP_EMAILS[@]}"; do
   group_email="${GROUP_EMAILS[$i]}"
@@ -693,20 +709,21 @@ for i in "${!GROUP_EMAILS[@]}"; do
     continue
   fi
 
-  # Convert to array (compatible with both bash 3.2+ and Cloud Shell)
-  members=()
-  while IFS= read -r line; do
-    [ -n "$line" ] && members+=("$line")
-  done <<< "$members_raw"
+  # Normalize emails: lowercase, non-empty, unique, sorted with LC_ALL=C
+  members_sorted=$(printf '%s\n' "$members_raw" | tr '[:upper:]' '[:lower:]' | awk 'NF' | LC_ALL=C sort -u)
 
-  member_count=${#members[@]}
+  if [ -n "$members_sorted" ]; then
+    member_count=$(printf '%s\n' "$members_sorted" | wc -l | tr -d ' ')
+  else
+    member_count=0
+  fi
+
+  TOTAL_MEMBERS_CHECKED=$((TOTAL_MEMBERS_CHECKED + member_count))
 
   # Record desired state now that the fetch succeeded (even if empty).
-  if [ "$DELETE_UNASSIGNED" = true ]; then
-    printf '%s\t\n' "$subscription_id" >> "$DESIRED_FILE"
-    for ((k = 0; k < member_count; k++)); do
-      printf '%s\t%s\n' "$subscription_id" "${members[$k]}" >> "$DESIRED_FILE"
-    done
+  printf '%s\t\n' "$subscription_id" >> "$DESIRED_FILE"
+  if [ "$member_count" -gt 0 ]; then
+    printf '%s\n' "$members_sorted" | awk -v s="$subscription_id" '{print s "\t" $0}' >> "$DESIRED_FILE"
   fi
 
   if [ "$member_count" -eq 0 ]; then
@@ -714,17 +731,45 @@ for i in "${!GROUP_EMAILS[@]}"; do
     continue
   fi
 
-  log INFO "Found ${member_count} members"
+  # Extract users currently assigned to this subscription_id from snapshot
+  current_assigned_for_sub=$(awk -F'\t' -v c="$subscription_id" '$2 == c {print tolower($1)}' "$CURRENT_LICENSES_FILE" | awk 'NF' | LC_ALL=C sort -u)
+
+  # Calculate delta: users in group who DO NOT have this subscription
+  to_assign_raw=$(comm -23 \
+    <(printf '%s\n' "$members_sorted" | awk 'NF') \
+    <(printf '%s\n' "$current_assigned_for_sub" | awk 'NF'))
+
+  to_assign=()
+  while IFS= read -r line; do
+    [ -n "$line" ] && to_assign+=("$line")
+  done <<< "$to_assign_raw"
+
+  to_assign_count=${#to_assign[@]}
+  already_assigned_count=$((member_count - to_assign_count))
+  TOTAL_ALREADY_ASSIGNED=$((TOTAL_ALREADY_ASSIGNED + already_assigned_count))
+
+  if [ "$to_assign_count" -eq 0 ]; then
+    log SUCCESS "All ${member_count} member(s) already have subscription ${subscription_id} — no API calls needed ✓"
+    continue
+  fi
+
+  log INFO "Found ${member_count} member(s): ${already_assigned_count} already licensed, ${to_assign_count} need assignment"
 
   # Process in batches
-  for ((j = 0; j < member_count; j += BATCH_SIZE)); do
-    batch=("${members[@]:j:BATCH_SIZE}")
+  for ((j = 0; j < to_assign_count; j += BATCH_SIZE)); do
+    batch=("${to_assign[@]:j:BATCH_SIZE}")
     batch_num=$(( (j / BATCH_SIZE) + 1 ))
-    total_batches=$(( (member_count + BATCH_SIZE - 1) / BATCH_SIZE ))
+    total_batches=$(( (to_assign_count + BATCH_SIZE - 1) / BATCH_SIZE ))
 
     log INFO "Assigning batch ${batch_num}/${total_batches} (${#batch[@]} users)..."
     if assign_licenses_batch "$subscription_id" "${batch[@]}"; then
       TOTAL_ASSIGNED=$((TOTAL_ASSIGNED + ${#batch[@]}))
+      # Update snapshot file so subsequent groups know these users now have this subscription
+      if [ "$DRY_RUN" = false ]; then
+        for email in "${batch[@]}"; do
+          printf '%s\t%s\n' "$email" "$subscription_id" >> "$CURRENT_LICENSES_FILE"
+        done
+      fi
     else
       TOTAL_ERRORS=$((TOTAL_ERRORS + 1))
     fi
@@ -742,17 +787,50 @@ if [ "$DELETE_UNASSIGNED" = true ]; then
   log HEADER ""
   log HEADER "Reconciling — revoking licenses for users no longer in their group"
 
-  snapshot=$(get_all_assigned_licenses)
+  # Refresh snapshot after assignments if live updates were made
+  if [ "$TOTAL_ASSIGNED" -gt 0 ] && [ "$DRY_RUN" = false ]; then
+    log INFO "Refreshing license snapshot after assignments..."
+    if ! get_all_assigned_licenses > "$CURRENT_LICENSES_FILE"; then
+      log WARN "Could not refresh snapshot; proceeding with local tracking."
+    fi
+  fi
+
+  # All desired users across ALL configured groups (used to protect users moving between editions)
+  all_desired_users=$(awk -F'\t' '$2 != "" {print tolower($2)}' "$DESIRED_FILE" | awk 'NF' | LC_ALL=C sort -u)
 
   while IFS= read -r cfg; do
     [ -z "$cfg" ] && continue
 
+    cfg_assigned=$(awk -F'\t' -v c="$cfg" '$2 == c {print tolower($1)}' "$CURRENT_LICENSES_FILE" | awk 'NF' | LC_ALL=C sort -u)
+    cfg_desired=$(awk -F'\t' -v c="$cfg" '$1 == c && $2 != "" {print tolower($2)}' "$DESIRED_FILE" | awk 'NF' | LC_ALL=C sort -u)
+
+    # Candidate leavers for this edition: assigned to cfg, but not in cfg's group
+    candidate_leavers=$(comm -23 \
+      <(printf '%s\n' "$cfg_assigned" | awk 'NF') \
+      <(printf '%s\n' "$cfg_desired" | awk 'NF'))
+
+    # Safety check: do NOT revoke anyone who belongs to ANY configured group
+    # (e.g., users who moved to another edition)
+    leavers_raw=$(comm -23 \
+      <(printf '%s\n' "$candidate_leavers" | awk 'NF') \
+      <(printf '%s\n' "$all_desired_users" | awk 'NF'))
+
+    # Report users protected by the edition-move safety check
+    protected_users=$(comm -12 \
+      <(printf '%s\n' "$candidate_leavers" | awk 'NF') \
+      <(printf '%s\n' "$all_desired_users" | awk 'NF'))
+
+    if [ -n "$protected_users" ]; then
+      protected_count=$(printf '%s\n' "$protected_users" | awk 'NF' | wc -l | tr -d ' ')
+      if [ "$protected_count" -gt 0 ]; then
+        log INFO "Config ${cfg}: protected ${protected_count} user(s) moving to another edition from revocation"
+      fi
+    fi
+
     leavers=()
     while IFS= read -r leaver; do
       [ -n "$leaver" ] && leavers+=("$leaver")
-    done < <(comm -23 \
-      <(printf '%s\n' "$snapshot" | awk -F'\t' -v c="$cfg" '$2 == c {print $1}' | sort -u) \
-      <(awk -F'\t' -v c="$cfg" '$1 == c && $2 != "" {print $2}' "$DESIRED_FILE" | sort -u))
+    done <<< "$leavers_raw"
 
     leaver_count=${#leavers[@]}
     if [ "$leaver_count" -eq 0 ]; then
@@ -770,15 +848,19 @@ if [ "$DELETE_UNASSIGNED" = true ]; then
       fi
       sleep 1
     done
-  done < <(cut -f1 "$DESIRED_FILE" | sort -u)
+  done < <(cut -f1 "$DESIRED_FILE" | awk 'NF' | LC_ALL=C sort -u)
 fi
 
 echo ""
 log HEADER "=========================================="
 log HEADER "Sync complete."
-log SUCCESS "Users assigned:  ${TOTAL_ASSIGNED}"
-log SUCCESS "Users revoked:   ${TOTAL_REVOKED}"
-log ERROR   "Batch errors:    ${TOTAL_ERRORS}"
+log NONE    "Total members checked:  ${TOTAL_MEMBERS_CHECKED}"
+log NONE    "Already licensed:       ${TOTAL_ALREADY_ASSIGNED}"
+log SUCCESS "New licenses assigned:  ${TOTAL_ASSIGNED}"
+log SUCCESS "Licenses revoked:       ${TOTAL_REVOKED}"
+if [ "$TOTAL_ERRORS" -gt 0 ]; then
+  log ERROR "Batch errors:           ${TOTAL_ERRORS}"
+fi
 if [ "$DRY_RUN" = true ]; then
   log WARN "*** This was a dry run — no changes were made ***"
 fi
