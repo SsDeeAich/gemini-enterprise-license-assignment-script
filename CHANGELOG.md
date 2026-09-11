@@ -8,6 +8,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **Optimized license assignment loop via `awk` and `comm` delta calculation.** Rather than blindly sending every group member to `batchUpdateUserLicenses` on every run, the script now snapshots current licenses upfront and computes the set difference (`comm -23`). Only users who do not already have the target license edition are batched and assigned. Groups where all members are already licensed require zero API calls and zero sleep time.
+- **Cross-edition safety check during reconciliation.** When `delete_unassigned: true`, users moving from one managed edition group to another (or present in any configured group) are protected against accidental license revocation.
+- **Strict `LC_ALL=C` collation and case normalization.** All email addresses from Google Groups and the Discovery Engine API snapshot are converted to lowercase and sorted using `LC_ALL=C sort -u` to ensure consistent diffing across Linux, macOS, and Cloud Shell environments.
 - **`delete_unassigned` now actually revokes licenses.** Previously every user in the
   payload carried a `licenseConfig`, so the `deleteUnassignedUserLicenses` flag was a
   no-op and users who left a group kept their license. The delete path is now a real
