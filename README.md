@@ -495,8 +495,12 @@ List all currently assigned licenses to confirm the sync worked:
 
 **Config validation errors** — The script validates configuration before running. If you see placeholder errors, ensure your `config.json` file has real values. Run `./gemini-helpers.sh get-project-number` and `./gemini-helpers.sh list-configs` to find the correct values.
 
-## License
+## Disclaimer and License
 
+This repository itself is not an officially supported Google product.
+The code in this repository is for demonstrative purposes only.
+
+```
 Copyright 2026 Google LLC
 
 Licensed under the Apache License, Version 2.0 (the "License");
@@ -510,3 +514,4 @@ distributed under the License is distributed on an "AS IS" BASIS,
 WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
+```
