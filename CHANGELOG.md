@@ -11,41 +11,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **Optimized license assignment loop via `awk` and `comm` delta calculation.** Rather than blindly sending every group member to `batchUpdateUserLicenses` on every run, the script now snapshots current licenses upfront and computes the set difference (`comm -23`). Only users who do not already have the target license edition are batched and assigned. Groups where all members are already licensed require zero API calls and zero sleep time.
 - **Cross-edition safety check during reconciliation.** When `delete_unassigned: true`, users moving from one managed edition group to another (or present in any configured group) are protected against accidental license revocation.
 - **Strict `LC_ALL=C` collation and case normalization.** All email addresses from Google Groups and the Discovery Engine API snapshot are converted to lowercase and sorted using `LC_ALL=C sort -u` to ensure consistent diffing across Linux, macOS, and Cloud Shell environments.
-- **`delete_unassigned` now actually revokes licenses.** Previously every user in the
-  payload carried a `licenseConfig`, so the `deleteUnassignedUserLicenses` flag was a
-  no-op and users who left a group kept their license. The delete path is now a real
-  reconcile: after assigning, the script lists all assigned licenses, diffs each managed
-  edition against its group, and explicitly unassigns the leavers. Only editions with a
-  successful group fetch are reconciled, so a transient `gcloud` error can no longer
-  trigger a mass revoke. Assignment calls now always send
-  `deleteUnassignedUserLicenses: false`.
-- **Per-group errors no longer abort the whole run.** Under `set -e`, a failing
-  `members_raw=$(get_group_members ...)` assignment aborted the script, making the
-  existing error-handling branch dead code. The fetch is now branched on directly so a
-  failed group is skipped and the sync continues.
-- **`updateMask` uses the canonical FieldMask string form** (`"userPrincipal,licenseConfig"`)
-  matching the Discovery Engine v1 schema, instead of the `{ "paths": [...] }` object form.
+- **`delete_unassigned` now actually revokes licenses.** Previously every user in the payload carried a `licenseConfig`, so the `deleteUnassignedUserLicenses` flag was a no-op and users who left a group kept their license. The delete path is now a real reconcile: after assigning, the script lists all assigned licenses, diffs each managed edition against its group, and explicitly unassigns the leavers. Only editions with a successful group fetch are reconciled, so a transient `gcloud` error can no longer trigger a mass revoke. Assignment calls now always send `deleteUnassignedUserLicenses: false`.
+- **Per-group errors no longer abort the whole run.** Under `set -e`, a failing `members_raw=$(get_group_members ...)` assignment aborted the script, making the existing error-handling branch dead code. The fetch is now branched on directly so a failed group is skipped and the sync continues.
+- **`updateMask` uses the canonical FieldMask string form** (`"userPrincipal,licenseConfig"`). matching the Discovery Engine v1 schema, instead of the `{ "paths": [...] }` object form.
+- Link to picture in `README.md`.
 
 ### Changed
 
 - Themed the output in Google brand colors (Blue/Red/Yellow/Green, 24-bit truecolor).
-- Clearer project prompts: the wizard now shows a "✓ Detected" line and an "(press Enter
-  to accept)" hint so it's obvious the bracketed value is the default.
+- Clearer project prompts: the wizard now shows a "✓ Detected" line and an "(press Enter to accept)" hint so it's obvious the bracketed value is the default.
 
 ### Added
 
-- Interactive setup wizard. Run `--setup` (or just run the script with no
-  `config.json` in a terminal) for a guided flow that confirms the project, discovers
-  license editions, shows each group's member count as you map it, explains the
-  revocation policy, writes `config.json`, and offers a dry run before any changes.
-  New flags: `--setup` (force wizard) and `--no-input` (never prompt; cron-safe).
-- Wizard region auto-detection: licenses are tied to a multi-region, so the wizard probes
-  a common set (`global`, `us`, `eu`, `ca`, `au`) and lists the regions where subscriptions
-  actually exist for you to pick. Additional multi-regions are whitelisted per project, so
-  it also offers a manual-entry option (with a note that licenses are region-bound) for any
-  region it didn't probe.
-- Subscription auto-resolution: set a `group_mappings` value to `"auto"` and, if the
-  project has exactly one license config, the script resolves it at startup. Combined with
-  the existing `project_id`/`project_number` auto-discovery, a single-edition setup needs
-  only the group email in `config.json`.
+- Interactive setup wizard. Run `--setup` (or just run the script with no `config.json` in a terminal) for a guided flow that confirms the project, discovers license editions, shows each group's member count as you map it, explains the revocation policy, writes `config.json`, and offers a dry run before any changes. New flags: `--setup` (force wizard) and `--no-input` (never prompt; cron-safe).
+- Wizard region auto-detection: licenses are tied to a multi-region, so the wizard probes a common set (`global`, `us`, `eu`, `ca`, `au`) and lists the regions where subscriptions actually exist for you to pick. Additional multi-regions are whitelisted per project, so it also offers a manual-entry option (with a note that licenses are region-bound) for any
+region it didn't probe.
+- Subscription auto-resolution: set a `group_mappings` value to `"auto"` and, if the project has exactly one license config, the script resolves it at startup. Combined with the existing `project_id`/`project_number` auto-discovery, a single-edition setup needs only the group email in `config.json`.
 - `Users revoked` count in the final summary.
+- Dockerfile and instructions to run on Cloud Run Jobs.
+- Added license header.

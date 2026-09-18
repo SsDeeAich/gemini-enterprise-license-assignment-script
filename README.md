@@ -1,6 +1,6 @@
 # Gemini Enterprise License Assignment Script
 
-<img width="566" height="297" alt="Screenshot 2026-07-01 at 4 53 26 PM" src="https://github.com/user-attachments/assets/b2c6e3f5-4136-4976-9a67-2456e9cf3577" />
+<img width="566" height="297" alt="Gemini Enterprise License Sync setup wizard" src="./picture.png" />
 
 ## The Problem
 
@@ -22,27 +22,27 @@ This gives you group-based license management where the group is the single sour
 ## How It Works
 
 ```
-┌─────────────────────────┐
+┌───────────────────────────┐
 │   Google Groups           │
 │                           │
 │  gemini-plus@company.com  │──► Plus licenses
 │  gemini-std@company.com   │──► Standard licenses
 │  gemini-fl@company.com    │──► Frontline licenses
-└─────────────────────────┘
+└───────────────────────────┘
             │
             ▼
     gcloud identity groups
     memberships list
             │
             ▼
-┌─────────────────────────┐
+┌───────────────────────────┐
 │  batchUpdateUserLicenses  │
 │  (Discovery Engine API)   │
 │                           │
 │  Each user gets the       │
 │  licenseConfig matching   │
 │  their group's edition    │
-└─────────────────────────┘
+└───────────────────────────┘
 ```
 
 ### Required APIs & Permissions
@@ -164,6 +164,234 @@ You can find your numeric project number by running:
 ./gemini-helpers.sh get-project-number my-gcp-project
 ```
 
+## Run on Cloud Run Jobs
+
+For unattended, scheduled syncs, run the script as a **Cloud Run job**. The
+repository ships a `Dockerfile` (Debian slim + a trimmed `gcloud`, `curl`, `jq`)
+and an `entrypoint.sh` that resolves `config.json` at startup. The job
+authenticates as its own service account — no `gcloud auth login`, no key files.
+
+Set these once; every command below uses them:
+
+```bash
+export PROJECT_ID="my-gcp-project"
+export REGION="europe-west1"
+export REPO="gemini-license-sync"
+export JOB="gemini-license-sync"
+export IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO}/gemini-license-sync:latest"
+export SA="gemini-license-sync@${PROJECT_ID}.iam.gserviceaccount.com"
+
+gcloud config set project "$PROJECT_ID"
+```
+
+### 1. Enable the APIs
+
+```bash
+gcloud services enable \
+  run.googleapis.com \
+  cloudbuild.googleapis.com \
+  artifactregistry.googleapis.com \
+  secretmanager.googleapis.com \
+  cloudscheduler.googleapis.com \
+  cloudidentity.googleapis.com \
+  discoveryengine.googleapis.com
+```
+
+### 2. Create the Artifact Registry repository
+
+```bash
+gcloud artifacts repositories create "$REPO" \
+  --repository-format=docker \
+  --location="$REGION" \
+  --description="Gemini Enterprise license sync images"
+```
+
+### 3. Build the image with Cloud Build
+
+From the directory containing the `Dockerfile`:
+
+```bash
+gcloud builds submit --region="$REGION" --tag "$IMAGE" .
+```
+
+Cloud Build uploads the source, builds the image and pushes it to Artifact
+Registry — about two minutes, for roughly 120 MB of compressed layers. The build
+runs as the Compute Engine default service account unless you pass
+`--service-account`; if it fails with a permissions error, grant that account
+`roles/artifactregistry.writer` and `roles/logging.logWriter`.
+
+The image pins a Cloud CLI version through the `GCLOUD_VERSION` build argument in
+the `Dockerfile`; edit its default to move to a newer release.
+
+### 4. Create the job's service account
+
+```bash
+gcloud iam service-accounts create gemini-license-sync \
+  --display-name="Gemini Enterprise license sync"
+
+# Assign and revoke licenses
+gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+  --member="serviceAccount:${SA}" \
+  --role="roles/discoveryengine.admin"
+
+# Let the script auto-discover the project number
+gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+  --member="serviceAccount:${SA}" \
+  --role="roles/browser"
+```
+
+> **Important:** the service account also needs to read Google Group
+> memberships. In the [Google Workspace Admin console](https://admin.google.com),
+> go to **Account → Admin roles → Groups Reader → Assign service accounts** and
+> add `${SA}`. Without this, every group lookup returns zero members and the
+> sync does nothing. (If `delete_unassigned` is `true`, a failed group lookup is
+> skipped rather than treated as an empty group, so it cannot cause a mass
+> revoke — see [`DELETE_UNASSIGNED`](#delete_unassigned).)
+
+### 5. Supply the configuration
+
+The entrypoint looks for the config in this order:
+
+| Source | How |
+|--------|-----|
+| `CONFIG_JSON` | The config as a literal JSON string — ideal with Secret Manager |
+| `CONFIG_GCS_URI` | `gs://bucket/path/config.json`, copied in at startup |
+| `/app/config.json` | Baked into the image (a `config.json` present at build time is copied in) or mounted as a volume |
+
+**Secret Manager (recommended)** — keeps the group mappings out of the image and
+lets you change them without rebuilding:
+
+```bash
+gcloud secrets create gemini-license-sync-config --data-file=config.json
+
+gcloud secrets add-iam-policy-binding gemini-license-sync-config \
+  --member="serviceAccount:${SA}" \
+  --role="roles/secretmanager.secretAccessor"
+```
+
+Update it later with:
+
+```bash
+gcloud secrets versions add gemini-license-sync-config --data-file=config.json
+```
+
+**Cloud Storage** — upload `config.json` to a bucket and grant the service
+account `roles/storage.objectViewer` on it, then set `CONFIG_GCS_URI` on the job.
+
+Set `project_id` and `project_number` explicitly in `config.json` for container
+runs, or rely on `CLOUDSDK_CORE_PROJECT` below plus `roles/browser` for
+auto-discovery.
+
+### 6. Create the job
+
+```bash
+gcloud run jobs create "$JOB" \
+  --image="$IMAGE" \
+  --region="$REGION" \
+  --service-account="$SA" \
+  --set-secrets="CONFIG_JSON=gemini-license-sync-config:latest" \
+  --set-env-vars="CLOUDSDK_CORE_PROJECT=${PROJECT_ID}" \
+  --max-retries=1 \
+  --task-timeout=30m
+```
+
+Use `--set-env-vars="CONFIG_GCS_URI=gs://my-bucket/config.json,CLOUDSDK_CORE_PROJECT=${PROJECT_ID}"`
+instead of `--set-secrets` if you went the Cloud Storage route.
+
+Large tenancies may need a longer `--task-timeout` (up to 24h) and more memory
+(`--memory=1Gi`); the defaults are fine for a few thousand users.
+
+`--max-retries=1` means one retry, so up to two attempts. The sync is idempotent
+— it skips users who already hold the right edition — so a retry after a
+transient API error is safe.
+
+### 7. Run it — dry run first
+
+```bash
+# Preview without touching any licenses
+gcloud run jobs execute "$JOB" --region="$REGION" --wait \
+  --args="--no-input,--dry-run"
+
+# The real thing
+gcloud run jobs execute "$JOB" --region="$REGION" --wait
+```
+
+The first execution spends a minute or so pulling the image; later ones start
+faster.
+
+Output goes to Cloud Logging. To follow a run:
+
+```bash
+gcloud beta run jobs logs tail "$JOB" --region="$REGION"
+```
+
+The container also writes its usual timestamped log file, but to the container's
+ephemeral `/tmp` — Cloud Logging is the durable copy.
+
+If any group fails to sync, the script exits non-zero and the execution is
+marked **failed**, so you can alert on it. A failed group is skipped, not
+treated as empty.
+
+### 8. Schedule it
+
+Have Cloud Scheduler invoke the job on a cron schedule:
+
+```bash
+gcloud iam service-accounts create gemini-sync-invoker \
+  --display-name="Gemini license sync invoker"
+
+gcloud run jobs add-iam-policy-binding "$JOB" \
+  --region="$REGION" \
+  --member="serviceAccount:gemini-sync-invoker@${PROJECT_ID}.iam.gserviceaccount.com" \
+  --role="roles/run.invoker"
+
+gcloud scheduler jobs create http gemini-license-sync-hourly \
+  --location="$REGION" \
+  --schedule="0 * * * *" \
+  --time-zone="Etc/UTC" \
+  --uri="https://${REGION}-run.googleapis.com/apis/run.googleapis.com/v1/namespaces/${PROJECT_ID}/jobs/${JOB}:run" \
+  --http-method=POST \
+  --oauth-service-account-email="gemini-sync-invoker@${PROJECT_ID}.iam.gserviceaccount.com"
+```
+
+Verify the wiring without waiting for the hour to turn:
+
+```bash
+gcloud scheduler jobs run gemini-license-sync-hourly --location="$REGION"
+```
+
+The trigger fires within a couple of minutes; confirm it with
+`gcloud run jobs executions list --job="$JOB" --region="$REGION"`, and see the
+scheduler's own view of the attempt with:
+
+```bash
+gcloud logging read 'resource.type="cloud_scheduler_job"' --limit=5 --freshness=1h
+```
+
+> **Note:** a scheduled invocation runs the job's *configured* arguments, so it
+> performs a real sync. `--dry-run` only applies to a manual
+> `gcloud run jobs execute --args=...`.
+
+Once it runs on a schedule, consider setting `delete_unassigned` to `true` so
+leaving a group revokes the license on the next run.
+
+### Updating the image
+
+```bash
+gcloud builds submit --region="$REGION" --tag "$IMAGE" .
+gcloud run jobs update "$JOB" --region="$REGION" --image="$IMAGE"
+```
+
+### Cloud Run troubleshooting
+
+| Symptom | Cause |
+|---------|-------|
+| `ERROR: no configuration found at /app/config.json` | Neither `CONFIG_JSON` nor `CONFIG_GCS_URI` is set and no config was baked in |
+| `No members found in group` | The service account is missing the Workspace Groups Reader role (step 4) |
+| `Could not auto-discover PROJECT_NUMBER` | Grant `roles/browser`, or set `project_number` in `config.json` |
+| HTTP 403 on assignment | Service account lacks `roles/discoveryengine.admin` on the project |
+| Build pushes but the job fails to start | Image built for the wrong architecture — build with Cloud Build (amd64), not locally on an Apple Silicon Mac |
+
 ## Configuration Options
 
 ### `DELETE_UNASSIGNED`
@@ -210,8 +438,8 @@ These commands read configuration from `config.json` (if present) or you can exp
 
 For continuous group-to-license sync, run the script on a schedule:
 
-**Cloud Scheduler + Cloud Function:**
-Deploy the logic as a Cloud Function triggered on a cron schedule (e.g., every hour). This keeps licenses in sync as users join and leave groups.
+**Cloud Run job + Cloud Scheduler (recommended):**
+Build the bundled `Dockerfile` and run it on a cron schedule — no machine to keep authenticated. See [Run on Cloud Run Jobs](#run-on-cloud-run-jobs).
 
 **Cron job:**
 On any machine with `gcloud` authenticated:
@@ -267,8 +495,12 @@ List all currently assigned licenses to confirm the sync worked:
 
 **Config validation errors** — The script validates configuration before running. If you see placeholder errors, ensure your `config.json` file has real values. Run `./gemini-helpers.sh get-project-number` and `./gemini-helpers.sh list-configs` to find the correct values.
 
-## License
+## Disclaimer and License
 
+This repository itself is not an officially supported Google product.
+The code in this repository is for demonstrative purposes only.
+
+```
 Copyright 2026 Google LLC
 
 Licensed under the Apache License, Version 2.0 (the "License");
@@ -282,4 +514,4 @@ distributed under the License is distributed on an "AS IS" BASIS,
 WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
-
+```

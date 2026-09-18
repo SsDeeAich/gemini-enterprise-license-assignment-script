@@ -1,5 +1,21 @@
 #!/bin/bash
 
+#!/bin/bash
+
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 # =============================================================================
 # Gemini Enterprise License Sync
 # Assigns licenses by edition based on Google Group membership
@@ -68,6 +84,14 @@ C_RED="\033[1;38;2;234;67;53m"
 C_BLUE="\033[1;38;2;66;133;244m"
 C_YELLOW="\033[1;38;2;251;188;4m"
 C_CYAN="\033[1;38;2;66;133;244m"   # headers use Google blue
+
+# Nothing renders escape codes when stdout is a pipe, a cron redirect or Cloud
+# Logging — they just show up as literal garbage. Drop them unless we're on a
+# terminal, and honour the NO_COLOR convention.
+if [ ! -t 1 ] || [ -n "${NO_COLOR:-}" ]; then
+  C_RESET=""; C_BOLD=""; C_GREEN=""; C_RED=""
+  C_BLUE=""; C_YELLOW=""; C_CYAN=""
+fi
 
 log() {
   local level="$1"
