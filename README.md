@@ -396,18 +396,22 @@ gcloud run jobs update "$JOB" --region="$REGION" --image="$IMAGE"
 
 ### `DELETE_UNASSIGNED`
 
-Controls whether the group becomes the authoritative source for each edition — i.e. whether users who left a group have their license revoked.
+Controls whether the groups become the authoritative source — i.e. whether users who left a group, or who were licensed by hand, have their license revoked.
 
 | Value | Behavior |
 |-------|----------|
 | `false` (default) | Only adds/updates licenses. Users who left a group keep their license. Safe for first runs. |
-| `true` | After assigning, the script lists all currently assigned licenses, and for each managed edition revokes any user assigned to that edition who is no longer in its group. |
+| `true` | After assigning, the script lists **every** assigned license in the project and revokes anyone who shouldn't have one — including licenses granted by hand in the console. |
 
 When `true`, the script reconciles rather than blindly deleting:
 
-- Only editions listed in `group_mappings` are ever touched. Licenses from configs the script doesn't manage are left alone.
-- An edition is only reconciled if its group was fetched successfully. If a group lookup fails (e.g. a permissions error), that edition is skipped entirely so a transient error can never trigger a mass revoke.
+- An edition listed in `group_mappings` is judged against its own group: assigned to that edition, no longer in that group, revoked.
+- Everything else in the user store is judged against the union of **all** configured groups. That covers a subscription absent from `group_mappings` and a console-granted seat recorded with no subscription attached: the holder keeps the license if they are in any configured group, and loses it otherwise. The groups are authoritative for the whole project, not only for the editions you listed.
+- Nobody in a configured group is ever revoked, even while holding the wrong edition — they are re-assigned to the one their group maps to instead.
+- An edition is only reconciled if its group was fetched successfully. If a group lookup fails (e.g. a permissions error), that edition is skipped, and so is everything judged against the union — an incomplete union would make legitimate users look like leavers.
 - If a group is fetched successfully but is **empty**, every license for that edition is revoked — an empty group means "nobody should have this edition."
+
+Every run prints the snapshot broken down by subscription and flags the ones missing from `config.json`, so you can see what the union rule is about to act on. Preview it with `--dry-run`.
 
 > **Warning:** On your first run, keep this `false` until you've verified assignments with `./gemini-helpers.sh list-licenses`. Revocation is immediate — a user loses access as soon as their license is revoked.
 
@@ -430,6 +434,7 @@ The `--setup` wizard probes the common multi-regions to auto-detect where your s
 ./gemini-helpers.sh get-project-number    # Look up numeric project number
 ./gemini-helpers.sh list-configs          # List license config IDs and edition info
 ./gemini-helpers.sh list-licenses         # List currently assigned user licenses
+./gemini-helpers.sh find-user <email>     # Show the raw license record for one user
 ```
 
 These commands read configuration from `config.json` (if present) or you can export `PROJECT_ID`, `LOCATION`, etc. as environment variables.
@@ -495,12 +500,8 @@ List all currently assigned licenses to confirm the sync worked:
 
 **Config validation errors** — The script validates configuration before running. If you see placeholder errors, ensure your `config.json` file has real values. Run `./gemini-helpers.sh get-project-number` and `./gemini-helpers.sh list-configs` to find the correct values.
 
-## Disclaimer and License
+## License
 
-This repository itself is not an officially supported Google product.
-The code in this repository is for demonstrative purposes only.
-
-```
 Copyright 2026 Google LLC
 
 Licensed under the Apache License, Version 2.0 (the "License");
@@ -514,4 +515,3 @@ distributed under the License is distributed on an "AS IS" BASIS,
 WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
-```
